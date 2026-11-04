@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.core.errors import GatewayError
 from app.schemas.chat import LLMRequest, LLMResponse
 from app.schemas.models import LogicalModelInfo, ModelConfiguration, ModelsConfiguration
+from app.streaming.provider import CompletionStream
 from app.structured_output.service import complete_structured
 
 
@@ -79,12 +80,22 @@ class ModelRegistry:
             raise GatewayError(503, "MODEL_NOT_CONFIGURED", "Model credentials are not configured")
         return adapter
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """校验模型能力，调用对应客户端，并将响应模型名转换回逻辑名。"""
+    async def complete(self, request: LLMRequest) -> LLMResponse | CompletionStream:
+        """校验模型能力并统一调用客户端；完整响应恢复逻辑模型名。"""
         configuration = self.get_configuration(request.model)
         # 在发起上游请求前检查能力，避免向不支持聊天的模型发送请求。
         if not configuration.capabilities.chat:
             raise GatewayError(422, "MODEL_CAPABILITY_NOT_SUPPORTED", "Model does not support chat")
+        if request.stream and not configuration.capabilities.streaming:
+            raise GatewayError(
+                422, "MODEL_CAPABILITY_NOT_SUPPORTED", "Model does not support streaming"
+            )
+        if request.stream and request.response_format is not None:
+            raise GatewayError(
+                422,
+                "STREAMING_STRUCTURED_OUTPUT_NOT_SUPPORTED",
+                "Streaming cannot be combined with response_format",
+            )
         limit = configuration.capabilities.max_output_tokens
         # 显式请求超过配置上限时直接报错，不静默缩减调用方指定的值。
         if limit is not None and request.max_tokens is not None and request.max_tokens > limit:
@@ -103,5 +114,7 @@ class ModelRegistry:
             response = await adapter.complete(upstream_request)
         else:
             response = await complete_structured(adapter, configuration, upstream_request)
+        if isinstance(response, CompletionStream):
+            return response
         # 对外的 model 字段始终使用逻辑名，调用方无需依赖供应商的真实模型名称。
         return response.model_copy(update={"model": request.model})

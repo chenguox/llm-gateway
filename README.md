@@ -6,7 +6,7 @@
 健康检查只确认 HTTP 服务正在运行，不检查外部模型服务。
 通过统一的 `LLMRequest` / `LLMResponse` 协议和 `POST /v1/chat/completions` 接口，
 按逻辑模型名匹配内部配置、独立密钥和模型客户端。
-目前支持文本聊天、非流式响应及经过 Pydantic 校验的结构化输出，上游可使用 Chat Completions 或 Anthropic Messages 协议。
+目前支持文本聊天、SSE 流式响应及经过 Pydantic 校验的非流式结构化输出，上游可使用 Chat Completions 或 Anthropic Messages 协议。
 内置逻辑模型 `flash-chat` 使用 Messages 协议调用 DeepSeek V4 Flash。
 
 ## 环境要求
@@ -66,9 +66,10 @@ Uvicorn 自身日志级别可用 `--log-level` 设置。
 
 ## 统一聊天接口协议
 
-接口为 `POST /v1/chat/completions`，请求和响应使用 `application/json`。
+接口为 `POST /v1/chat/completions`，请求使用 `application/json`。
+`stream=false` 返回 JSON，`stream=true` 返回 `text/event-stream`。
 协议定义位于 `app/schemas/chat.py`，也可从 `app.schemas` 导入 `LLMRequest` 和 `LLMResponse`。
-Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse`。
+Swagger 文档中的请求类型为 `LLMRequest`，响应同时声明 JSON 和 SSE 两种媒体类型。
 
 ### LLM Request
 
@@ -85,7 +86,7 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 | `temperature` | number / null | 否 | 范围 0～2；省略或为 null 时不传给上游 |
 | `top_p` | number / null | 否 | 范围 0～1；省略或为 null 时不传给上游 |
 | `max_tokens` | integer / null | 否 | 正整数；省略或为 null 时使用模型配置的输出上限；未配置上限时 Messages 默认 1024，Chat Completions 不传 |
-| `stream` | boolean | 否 | 默认 `false`，本次仅支持非流式响应，`true` 返回 HTTP 422 |
+| `stream` | boolean | 否 | 默认 `false`；`true` 返回统一 SSE 事件，要求模型启用 `streaming`，不能与 `response_format` 同用 |
 | `response_format` | object / null | 否 | `json_object` 或 `json_schema`；只有通过网关校验的 JSON 对象才成功返回 |
 | `max_retries` | integer | 否 | 校验失败后的修复重试次数，默认 1，范围 0～3；不传给上游，普通文本请求不使用 |
 
@@ -110,6 +111,64 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
   "stream": false
 }
 ```
+
+### SSE 流式响应
+
+仍使用同一个聊天接口，设置 `stream=true` 即可。在 PowerShell 中调用：
+
+```powershell
+$body = '{"model":"general-chat","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+$body | curl.exe -N http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: application/json" --data-binary "@-"
+```
+
+网关将供应商数据转换成统一事件，不透传原始 Chunk、Messages 事件或 `[DONE]`。
+响应设置 `Cache-Control: no-cache` 和 `X-Accel-Buffering: no`，逐事件写入连接。
+
+| SSE `event` | 含义 | JSON 数据中的附加字段 |
+| --- | --- | --- |
+| `started` | 流已建立，只发送一次 | 无 |
+| `delta` | 文本、推理内容或角色增量 | `delta.index`、`delta.content`、`delta.reasoning_content`、`delta.role` |
+| `usage` | 用量快照，供应商提供时发送，可多次更新 | `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` |
+| `completed` | 供应商明确结束响应 | `finish_reasons` 数组及最终 `usage`（如有） |
+| `failed` | 流执行失败 | `error.code`、`error.message` 及已知用量（如有） |
+| `cancelled` | 请求被取消 | `reason` 及已知用量（如有） |
+
+每条事件的 JSON 都包含 `type`、`stream_id`、`sequence` 和逻辑模型名 `model`。
+`sequence` 从 1 递增，SSE `id` 为 `<stream_id>:<sequence>`；不提供断点续传或历史重放。
+未提供的字段直接省略。增量内容按序拼接；用量是累计快照，应以后一个替换前一个，不应累加。
+`delta.index` 表示候选答案序号，Messages 协议统一为 0，不暴露上游内容块序号。
+
+```text
+id: stream-demo:1
+event: started
+data: {"type":"started","stream_id":"stream-demo","sequence":1,"model":"general-chat"}
+
+id: stream-demo:2
+event: delta
+data: {"type":"delta","stream_id":"stream-demo","sequence":2,"model":"general-chat","delta":{"index":0,"content":"Hello!"}}
+
+id: stream-demo:3
+event: completed
+data: {"type":"completed","stream_id":"stream-demo","sequence":3,"model":"general-chat","finish_reasons":[{"index":0,"finish_reason":"stop"}]}
+
+```
+
+网关为每条已建立的流只确定一个终态：`completed`、`failed` 或 `cancelled`。
+终态后不再输出事件；供应商重复的结束标记不会产生第二个终态。
+Chat Completions 必须收到 `[DONE]` 且候选答案均已结束；Messages 必须收到 `message_stop`。
+只有内容结束而缺少整个响应的结束标记时，不会误报完成，仍可接收后续用量。
+`completed` 表示协议正常结束；是否因输出长度限制而截断，需要检查 `finish_reasons` 中的 `length`。
+
+参数、能力校验以及上游连接或 HTTP 状态错误在 SSE 建立前返回原有 HTTP JSON 错误。
+SSE 建立后，超时、网络错误、无效数据及供应商错误事件转换为唯一的 `failed`，HTTP 状态仍为 200。
+客户端不能仅凭 HTTP 200 判断生成成功，也不能将未收到终态的连接关闭视为完成。
+流式调用不自动重试，避免重复输出；`max_retries` 不作用于流式请求。
+`stream=true` 与 `response_format` 同用返回 HTTP 422，错误码为 `STREAMING_STRUCTURED_OUTPUT_NOT_SUPPORTED`。
+
+客户端断开或服务端取消请求时，停止上游读取并释放连接，内部确定并记录唯一终态。
+连接已断开或请求任务已取消时无法保证发送 `cancelled`；内部终态通过 `app.streaming.service` 的 INFO 日志记录。
+终态日志使用网关流 ID 和逻辑模型名，不包含原始供应商错误内容。
+此日志不是持久化任务状态查询接口。
 
 ### LLM Response
 
@@ -182,12 +241,13 @@ Invoke-RestMethod -Method Post `
 
 | HTTP 状态码 | `error.code` | 场景 |
 | --- | --- | --- |
-| 422 | `VALIDATION_ERROR` | 请求参数不合法或请求流式响应 |
+| 422 | `VALIDATION_ERROR` | 请求参数不合法 |
 | 404 | `PROMPT_TEMPLATE_NOT_FOUND` | 系统提示词模板名或版本不存在 |
 | 422 | `PROMPT_PARAMETER_ERROR` | 模板参数缺失或提供了未定义参数 |
 | 404 | `MODEL_NOT_FOUND` | 逻辑模型不存在，不会回退到其他模型 |
 | 503 | `MODEL_NOT_CONFIGURED` | 当前模型指定的密钥变量缺失或为空白 |
-| 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 配置中的模型不支持聊天 |
+| 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 配置中的模型不支持聊天、流式或指定的结构化输出模式 |
+| 422 | `STREAMING_STRUCTURED_OUTPUT_NOT_SUPPORTED` | 流式请求同时指定了 `response_format` |
 | 422 | `MODEL_TOKEN_LIMIT_EXCEEDED` | 请求的输出 token 数超过该模型配置的上限 |
 | 422 | `INVALID_MESSAGES` | Messages 协议请求只有 system 消息，缺少用户或助手消息 |
 | 429 | `UPSTREAM_RATE_LIMITED` | 上游返回限流状态 |
@@ -229,7 +289,7 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 10
 默认 `general-chat`、`coding-assistant` 已声明 `json_object`；请求 Schema 时可回退到该模式，仍按原始 Schema 校验。
 原生 `json_schema` 优先使用；模型和协议均不支持时返回 422。
 请求示例、Schema 支持范围及修复重试说明见 [结构化输出说明](app/structured_output/README.md)。
-模型能力声明不会自动开启网关尚未实现的流式、工具调用或多模态接口。
+流式请求会检查模型的 `streaming` 能力；工具调用或多模态接口尚未实现。
 
 配置加载时校验名称重复、密钥变量重复、适配器类型、地址和结构化输出模式等内容。
 修改配置或密钥后需要重启服务。详细字段、客户端创建和迁移步骤见 [模型配置管理说明](config/README.md)。
@@ -279,8 +339,7 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 10
 
 `app/adapters/base.py` 中的 `ModelAdapter` 使用 Python `Protocol` 定义接口：
 
-- `await complete(request)`：接收内部请求，返回统一的 `LLMResponse`。
-- `stream(request)`：预留流式返回类型，当前抛出 `NotImplementedError`。
+- `await complete(request)`：统一调用入口；按 `request.stream` 返回 `LLMResponse` 或已建立的 `CompletionStream`。
 - `await healthcheck()`：检查上游连通性及认证，不生成聊天内容。
 - `await aclose()`：释放适配器持有的资源。
 
@@ -288,6 +347,11 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 10
 
 - `deepseek` / `openai_compatible`：创建 `DeepSeekChatAdapter` / `ChatCompletionsAdapter`，采用 Bearer 认证，在 `base_url` 后追加 `/chat/completions`。
 - `anthropic`：创建 `AnthropicMessagesAdapter`，采用 `x-api-key` 和 `anthropic-version: 2023-06-01`，调用 `/v1/messages`；`base_url` 已含 `/v1` 时不会重复追加。
+
+`CompletionStream` 支持异步迭代统一的 `StreamUpdate`，并通过 `aclose()` 释放上游连接。
+适配器使用单一 `complete()` 接口，不再提供独立的 `stream()` 方法或预留 Chunk 类型。
+`app/streaming/` 负责 SSE 记录解析、供应商归一化和唯一终态控制；公开事件定义位于 `app/schemas/streaming.py`。
+Chat Completions 请求用量尾包，供应商未返回用量时不推算；Messages 合并缓存输入并使用累计输出用量。
 
 Messages 响应的文本块合并为 `content`，可见推理块合并为 `reasoning_content`，加密推理块不向调用方输出。
 结束原因和 token 用量转换为统一字段；输入用量包含缓存创建与读取 token。
@@ -380,7 +444,8 @@ llm-gateway/
 │   │   ├── compatible.py   # 通用 Chat Completions 协议
 │   │   └── factory.py      # 按配置创建客户端
 │   ├── schemas/
-│   │   ├── chat.py         # 统一请求、响应和流式块类型
+│   │   ├── chat.py         # 统一请求及非流式响应类型
+│   │   ├── streaming.py    # 统一增量、用量和 SSE 事件类型
 │   │   ├── prompts.py      # 模板选择和参数协议
 │   │   └── models.py       # 模型配置和公开能力协议
 │   ├── models/
@@ -407,4 +472,4 @@ llm-gateway/
 
 ## 下一步
 
-逐步加入结构化输出请求、流式响应、工具调用、多模态和网关鉴权。
+逐步加入流式结构化输出、工具调用、多模态和网关鉴权。

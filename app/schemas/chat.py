@@ -1,4 +1,4 @@
-"""Typed chat completion requests, responses and future stream chunks."""
+"""Typed chat completion requests and responses."""
 
 from typing import Annotated, Literal
 
@@ -28,7 +28,7 @@ class LLMRequest(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
     max_tokens: int | None = Field(default=None, gt=0)
-    stream: Literal[False] = False
+    stream: bool = Field(default=False, strict=True)
     response_format: ResponseFormat | None = Field(
         default=None, exclude=True, description="Validated JSON object or JSON Schema output."
     )
@@ -85,26 +85,3 @@ class LLMResponse(BaseModel):
 
 ChatCompletionRequest = LLMRequest
 ChatCompletionResponse = LLMResponse
-
-
-class ChatCompletionDelta(BaseModel):
-    role: Literal["assistant"] | None = None
-    content: str | None = None
-    reasoning_content: str | None = None
-
-
-class ChatCompletionChunkChoice(BaseModel):
-    index: int = Field(ge=0)
-    delta: ChatCompletionDelta
-    finish_reason: str | None = None
-
-
-class ChatCompletionChunk(BaseModel):
-    """Reserved return type for future streaming implementations."""
-
-    id: str
-    object: Literal["chat.completion.chunk"]
-    created: int
-    model: str
-    choices: list[ChatCompletionChunkChoice]
-    usage: ChatCompletionUsage | None = None

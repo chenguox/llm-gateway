@@ -1,6 +1,5 @@
 """将统一文本请求转换为 Anthropic Messages 协议，并归一化响应。"""
 
-from collections.abc import AsyncIterator
 from time import time
 from types import TracebackType
 from typing import Self
@@ -16,17 +15,18 @@ from app.schemas.anthropic import (
 from app.schemas.chat import (
     AssistantMessage,
     ChatCompletionChoice,
-    ChatCompletionChunk,
     ChatCompletionUsage,
     LLMRequest,
     LLMResponse,
 )
 from app.schemas.structured_output import JsonSchemaFormat
+from app.streaming.anthropic import finish_reason, normalize_messages
+from app.streaming.provider import CompletionStream, open_completion_stream
 from app.structured_output.formats import native_schema
 
 
 class AnthropicMessagesAdapter:
-    """支持 Claude 原生及兼容服务的文本、非流式 Messages 请求。"""
+    """支持 Claude 原生及兼容服务的文本 Messages 请求。"""
 
     def __init__(
         self,
@@ -63,8 +63,8 @@ class AnthropicMessagesAdapter:
             else httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0))
         )
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """提取顶层 system，保留对话历史，并调用上游 /v1/messages。"""
+    async def complete(self, request: LLMRequest) -> LLMResponse | CompletionStream:
+        """提取 system 并调用 Messages，按 stream 参数返回响应或事件流。"""
         # 此协议版本的 messages 仅承载用户和助手消息，system 在下方单独组装。
         messages = [
             message.model_dump() for message in request.messages if message.role != "system"
@@ -79,7 +79,7 @@ class AnthropicMessagesAdapter:
             "model": request.model,
             "messages": messages,
             "max_tokens": request.max_tokens or self._default_max_tokens,
-            "stream": False,
+            "stream": request.stream,
         }
         system_messages = [
             message.content for message in request.messages if message.role == "system"
@@ -104,6 +104,15 @@ class AnthropicMessagesAdapter:
         elif request.response_format is not None:
             raise GatewayError(
                 422, "MODEL_CAPABILITY_NOT_SUPPORTED", "Messages does not support JSON object mode"
+            )
+        if request.stream:
+            return await open_completion_stream(
+                self._client,
+                f"{self._api_url}/messages",
+                headers=self._headers,
+                payload=payload,
+                timeout=self._timeout,
+                normalize=normalize_messages,
             )
         response = await self._client.post(
             f"{self._api_url}/messages",
@@ -139,13 +148,7 @@ class AnthropicMessagesAdapter:
             + response.usage.cache_read_input_tokens
         )
         # 将常见结束原因映射到统一协议；其余原因（包括 None）原样保留。
-        finish_reason = {
-            "end_turn": "stop",
-            "stop_sequence": "stop",
-            "max_tokens": "length",
-            "model_context_window_exceeded": "length",
-            "refusal": "content_filter",
-        }.get(response.stop_reason, response.stop_reason)
+        reason = finish_reason(response.stop_reason) if response.stop_reason is not None else None
         return LLMResponse(
             id=response.id,
             object="chat.completion",
@@ -153,17 +156,13 @@ class AnthropicMessagesAdapter:
             created=int(time()),
             # 此处保留上游模型名，模型注册表会在返回调用方前改回逻辑模型名。
             model=response.model,
-            choices=[ChatCompletionChoice(index=0, message=message, finish_reason=finish_reason)],
+            choices=[ChatCompletionChoice(index=0, message=message, finish_reason=reason)],
             usage=ChatCompletionUsage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=response.usage.output_tokens,
                 total_tokens=prompt_tokens + response.usage.output_tokens,
             ),
         )
-
-    def stream(self, request: LLMRequest) -> AsyncIterator[ChatCompletionChunk]:
-        """预留流式接口，当前仅支持完整 JSON 响应。"""
-        raise NotImplementedError("Messages streaming is not implemented yet")
 
     async def healthcheck(self) -> bool:
         """检查上游模型列表，不通过生成消息消耗 token。"""

@@ -107,16 +107,3 @@ def test_healthcheck_checks_authenticated_models_access(status_code: int, expect
                 assert await adapter.healthcheck() is expected
 
     asyncio.run(run())
-
-
-def test_stream_is_explicitly_unimplemented() -> None:
-    async def run() -> None:
-        async with DeepSeekChatAdapter(api_key="unit-test-key") as adapter:
-            with pytest.raises(NotImplementedError, match="streaming"):
-                adapter.stream(
-                    ChatCompletionRequest(
-                        model="deepseek-chat", messages=[ChatMessage(role="user", content="Hello")]
-                    )
-                )
-
-    asyncio.run(run())

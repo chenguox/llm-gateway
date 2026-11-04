@@ -9,7 +9,7 @@
       "timeout_seconds": 60,
       "capabilities": {
         "chat": true,
-        "streaming": false,
+        "streaming": true,
         "tools": false,
         "vision": false,
         "reasoning": false,
@@ -25,7 +25,7 @@
       "timeout_seconds": 60,
       "capabilities": {
         "chat": true,
-        "streaming": false,
+        "streaming": true,
         "tools": false,
         "vision": false,
         "reasoning": false,
@@ -41,7 +41,7 @@
       "timeout_seconds": 60,
       "capabilities": {
         "chat": true,
-        "streaming": false,
+        "streaming": true,
         "tools": false,
         "vision": false,
         "reasoning": true,

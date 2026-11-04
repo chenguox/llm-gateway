@@ -1,18 +1,14 @@
 """Provider-independent model adapter protocol."""
 
-from collections.abc import AsyncIterator
 from typing import Protocol
 
-from app.schemas.chat import ChatCompletionChunk, LLMRequest, LLMResponse
+from app.schemas.chat import LLMRequest, LLMResponse
+from app.streaming.provider import CompletionStream
 
 
 class ModelAdapter(Protocol):
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """Send a non-streaming chat completion request."""
-        ...
-
-    def stream(self, request: LLMRequest) -> AsyncIterator[ChatCompletionChunk]:
-        """Return an async iterator of chat completion chunks."""
+    async def complete(self, request: LLMRequest) -> LLMResponse | CompletionStream:
+        """Return a completion or an open event stream according to request.stream."""
         ...
 
     async def healthcheck(self) -> bool:

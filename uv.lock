@@ -225,6 +225,7 @@ name = "llm-gateway"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "fastapi" },
     { name = "httpx2" },
     { name = "pydantic-settings" },
@@ -239,6 +240,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.0,<5.0" },
     { name = "fastapi", specifier = ">=0.115,<1.0" },
     { name = "httpx2", specifier = ">=2.16.0,<3.0" },
     { name = "pydantic-settings", specifier = ">=2.6,<3.0" },

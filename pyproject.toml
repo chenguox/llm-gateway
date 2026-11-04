@@ -5,6 +5,7 @@ description = "An incremental LLM gateway built with FastAPI."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "anyio>=4.0,<5.0",
     "fastapi>=0.115,<1.0",
     "httpx2>=2.16.0,<3.0",
     "pydantic-settings>=2.6,<3.0",

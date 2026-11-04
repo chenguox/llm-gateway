@@ -80,7 +80,8 @@ def test_chat_defaults_to_non_streaming_and_omits_unset_options(
         {"top_p": 1.1},
         {"max_tokens": 0},
         {"max_tokens": 1.5},
-        {"stream": True},
+        {"stream": "true"},
+        {"stream": 1},
         {"tools": []},
     ],
 )

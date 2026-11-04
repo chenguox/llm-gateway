@@ -1,13 +1,14 @@
 """通过异步 HTTP 客户端调用兼容 Chat Completions 协议的模型服务。"""
 
-from collections.abc import AsyncIterator
 from types import TracebackType
 from typing import Self
 
 import httpx2 as httpx
 
-from app.schemas.chat import ChatCompletionChunk, LLMRequest, LLMResponse
+from app.schemas.chat import LLMRequest, LLMResponse
 from app.schemas.structured_output import JsonSchemaFormat
+from app.streaming.compatible import normalize_completions
+from app.streaming.provider import CompletionStream, open_completion_stream
 from app.structured_output.formats import native_schema
 
 
@@ -40,12 +41,20 @@ class ChatCompletionsAdapter:
             else httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0))
         )
 
-    async def complete(self, request: LLMRequest) -> LLMResponse:
-        """将统一请求发送给上游，并将上游 JSON 校验为统一响应。"""
+    async def complete(self, request: LLMRequest) -> LLMResponse | CompletionStream:
+        """根据 stream 参数返回完整响应或已建立的统一事件流。"""
         # 忽略值为 None 的可选参数；system_prompt 已由请求模型声明排除序列化。
         payload = request.model_dump(mode="json", exclude_none=True)
-        # 当前仅实现非流式调用，确保上游返回完整 JSON 而不是事件流。
-        payload["stream"] = False
+        if request.stream:
+            payload["stream_options"] = {"include_usage": True}
+            return await open_completion_stream(
+                self._client,
+                f"{self._base_url}/chat/completions",
+                headers=self._headers,
+                payload=payload,
+                timeout=self._timeout,
+                normalize=normalize_completions,
+            )
         if isinstance(request.response_format, JsonSchemaFormat):
             specification = request.response_format.json_schema
             payload["response_format"] = {
@@ -67,10 +76,6 @@ class ChatCompletionsAdapter:
         # 将 HTTP 错误和响应校验异常向上传递，由 API 层统一转换为网关错误。
         response.raise_for_status()
         return LLMResponse.model_validate(response.json())
-
-    def stream(self, request: LLMRequest) -> AsyncIterator[ChatCompletionChunk]:
-        """预留流式接口，当前调用时明确报告尚未实现。"""
-        raise NotImplementedError("Chat completion streaming is not implemented yet")
 
     async def healthcheck(self) -> bool:
         """访问需要认证的模型列表接口，检查连通性而不发起文本生成。"""

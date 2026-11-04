@@ -206,8 +206,6 @@ def test_healthcheck_and_lifecycle(status: int, expected: bool) -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
         async with AnthropicMessagesAdapter(api_key="key", client=client) as adapter:
             assert await adapter.healthcheck() is expected
-            with pytest.raises(NotImplementedError, match="streaming"):
-                adapter.stream(make_request())
         assert not client.is_closed
         await client.aclose()
         owned = AnthropicMessagesAdapter(api_key="key")

@@ -62,6 +62,9 @@ async def complete_structured(
     usage_complete = True
     for attempt in range(1, request.max_retries + 2):
         response = await adapter.complete(upstream_request)
+        if not isinstance(response, LLMResponse):
+            await response.aclose()
+            raise TypeError("Structured output requires a non-streaming completion")
         if response.usage is None:
             usage_complete = False
         else:

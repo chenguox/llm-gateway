@@ -1,12 +1,15 @@
 """Consistent error responses for HTTP, validation and unexpected errors."""
 
 import logging
+from json import JSONDecodeError
 from typing import Any
 
+import httpx2 as httpx
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from starlette.exceptions import HTTPException
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,24 @@ class GatewayError(Exception):
         self.code = code
         self.message = message
         self.details = details
+
+
+def map_upstream_error(exc: Exception) -> GatewayError | None:
+    if isinstance(exc, GatewayError):
+        return exc
+    if isinstance(exc, httpx.TimeoutException):
+        return GatewayError(504, "UPSTREAM_TIMEOUT", "Model provider request timed out")
+    if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code == 429:
+            return GatewayError(429, "UPSTREAM_RATE_LIMITED", "Model provider rate limit exceeded")
+        return GatewayError(502, "UPSTREAM_HTTP_ERROR", "Model provider request failed")
+    if isinstance(exc, httpx.RequestError):
+        return GatewayError(502, "UPSTREAM_CONNECTION_ERROR", "Model provider connection failed")
+    if isinstance(exc, (JSONDecodeError, UnicodeDecodeError, ValidationError)):
+        return GatewayError(
+            502, "UPSTREAM_INVALID_RESPONSE", "Model provider returned an invalid response"
+        )
+    return None
 
 
 def error_response(

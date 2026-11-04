@@ -12,7 +12,7 @@
 示例配置包含 `general-chat`、`coding-assistant` 和 `flash-chat`。
 前两个逻辑模型使用 Chat Completions 协议；`flash-chat` 使用 Messages 协议调用 DeepSeek V4 Flash。
 三个入口使用不同的密钥变量；可以独立修改实际模型和服务地址。
-示例能力采用保守配置：文本非流式能力，以及前两个入口的 JSON Object 输出，不代表供应商的全部能力。
+三个示例入口均启用文本聊天和流式能力；前两个入口还启用非流式 JSON Object 输出，不代表供应商的全部能力。
 
 ## 模型字段
 
@@ -78,7 +78,7 @@ Anthropic 官方服务可配置 `https://api.anthropic.com`，真实模型名填
 但原模型已退役，请求由 DeepSeek-V4.1-Flash-1017 承接；该标识不能锁定原始 V4 模型。
 这里按需求保留 `deepseek-v4-flash`；若需要供应商当前通用别名，可将内部 `model` 改为 `deepseek-flash`。
 `max_output_tokens=8192` 是本项目设置的输出上限和默认值，不是供应商能力上限。
-该入口未启用结构化输出、流式、工具调用或视觉输入。
+该入口已启用流式，未启用结构化输出、工具调用或视觉输入。
 
 协议及模型标识参考：[DeepSeek Anthropic 兼容接口](https://api-docs.deepseek.com/guides/anthropic_api/)、
 [DeepSeek 模型说明](https://api-docs.deepseek.com/quick_start/pricing/)、
@@ -89,7 +89,7 @@ Anthropic 官方服务可配置 `https://api.anthropic.com`，真实模型名填
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `chat` | true | 是否支持聊天，false 时聊天请求返回 422 |
-| `streaming` | false | 是否支持流式输出 |
+| `streaming` | false | 是否支持流式输出；为 false 时，`stream=true` 请求返回 422 |
 | `tools` | false | 是否支持工具调用 |
 | `vision` | false | 是否支持视觉输入 |
 | `reasoning` | false | 是否支持推理能力 |
@@ -121,7 +121,9 @@ Chat Completions 适配器实现两种格式；Messages 实现 `output_config.fo
 默认 `general-chat`、`coding-assistant` 配置为 `supported=true`、`modes=["json_object"]`。
 DeepSeek Messages 入口 `flash-chat` 不支持这一原生格式约束，仍保持 `supported=false`。
 完整说明见 [结构化输出](../app/structured_output/README.md)。
-模型能力声明不会自动启用网关当前尚未实现的流式、工具调用或多模态接口。
+`stream=true` 使用同一个聊天接口返回统一 SSE 事件，要求对应模型启用 `streaming`。
+不能同时指定 `response_format`；事件协议和唯一终态规则见 [项目说明](../README.md#sse-流式响应)。
+模型能力声明不会自动启用网关当前尚未实现的工具调用或多模态接口。
 
 如果配置了 `max_output_tokens`，请求超过上限会直接返回错误，不会静默截断。
 请求未指定 `max_tokens` 或值为 null 时，使用配置上限作为发往上游的 `max_tokens`。
@@ -175,7 +177,8 @@ FLASH_CHAT_API_KEY=Flash模型的独立密钥
 | --- | --- | --- |
 | 404 | `MODEL_NOT_FOUND` | 未配置该逻辑模型，不会回退选择其他模型 |
 | 503 | `MODEL_NOT_CONFIGURED` | 该模型的密钥缺失或为空 |
-| 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 模型配置不支持聊天 |
+| 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 模型配置不支持聊天、流式或指定的输出模式 |
+| 422 | `STREAMING_STRUCTURED_OUTPUT_NOT_SUPPORTED` | 流式请求同时指定了 `response_format` |
 | 422 | `MODEL_TOKEN_LIMIT_EXCEEDED` | 请求输出 token 数超过配置上限 |
 | 422 | `INVALID_MESSAGES` | Messages 请求缺少用户或助手消息 |
 | 422 | `STRUCTURED_OUTPUT_SCHEMA_INVALID` | Schema 不合法或含有未实现的约束 |

@@ -13,7 +13,7 @@
 
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "general-chat",
   "system_prompt": {
     "name": "customer_support",
     "version": "1.0.0",

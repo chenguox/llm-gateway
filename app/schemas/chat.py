@@ -15,7 +15,9 @@ class ChatMessage(BaseModel):
 class LLMRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] = Field(
+        description="Logical model name from GET /v1/models; provider model names are private."
+    )
     messages: list[ChatMessage] = Field(min_length=1)
     system_prompt: PromptSelection | None = Field(
         default=None,

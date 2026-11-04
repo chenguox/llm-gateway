@@ -1,0 +1,36 @@
+{
+  "models": [
+    {
+      "logical_name": "general-chat",
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "GENERAL_CHAT_API_KEY",
+      "timeout_seconds": 60,
+      "capabilities": {
+        "chat": true,
+        "streaming": false,
+        "tools": false,
+        "vision": false,
+        "reasoning": false,
+        "structured_output": {"supported": false, "modes": []}
+      }
+    },
+    {
+      "logical_name": "coding-assistant",
+      "provider": "openai_compatible",
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com/v1",
+      "api_key_env": "CODING_ASSISTANT_API_KEY",
+      "timeout_seconds": 60,
+      "capabilities": {
+        "chat": true,
+        "streaming": false,
+        "tools": false,
+        "vision": false,
+        "reasoning": false,
+        "structured_output": {"supported": false, "modes": []}
+      }
+    }
+  ]
+}

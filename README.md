@@ -4,7 +4,8 @@
 
 当前包含健康检查、环境变量配置、控制台日志、统一错误响应、系统提示词管理、自动 API 文档和聊天接口。
 健康检查只确认 HTTP 服务正在运行，不检查外部模型服务。
-通过统一的 `LLMRequest` / `LLMResponse` 协议和 `POST /v1/chat/completions` 接口调用 DeepSeek。
+通过统一的 `LLMRequest` / `LLMResponse` 协议和 `POST /v1/chat/completions` 接口，
+按逻辑模型名匹配内部配置、独立密钥和模型客户端。
 目前支持文本聊天和非流式响应。
 
 ## 环境要求
@@ -53,9 +54,9 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 | `APP_NAME` | `LLM Gateway` | 应用名称，显示在 API 文档中 |
 | `ENVIRONMENT` | `development` | 环境标识，可选 `development`、`test`、`production` |
 | `LOG_LEVEL` | `INFO` | 应用日志级别，可选 `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` |
-| `DEEPSEEK_API_KEY` | 空 | DeepSeek 密钥，仅在创建 DeepSeek 适配器时必填 |
-| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek API 根地址，也支持以 `/v1` 结尾的地址 |
-| `DEEPSEEK_TIMEOUT_SECONDS` | `60` | 单次 HTTP 网络操作的超时秒数，必须大于 0 |
+| `MODELS_CONFIG_PATH` | 项目下的 `config/models.json` | 模型配置文件路径，默认路径不依赖工作目录 |
+| `GENERAL_CHAT_API_KEY` | 空 | 示例逻辑模型 `general-chat` 的独立密钥 |
+| `CODING_ASSISTANT_API_KEY` | 空 | 示例逻辑模型 `coding-assistant` 的独立密钥 |
 
 `ENVIRONMENT` 目前仅作为环境标识，不会自动切换部署配置。监听地址和端口通过 Uvicorn 参数设置；
 Uvicorn 自身日志级别可用 `--log-level` 设置。
@@ -71,7 +72,7 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `model` | string | 是 | 模型名称，去除首尾空白后不能为空，例如 `deepseek-chat` |
+| `model` | string | 是 | 逻辑模型名称，例如 `general-chat`，可通过 `GET /v1/models` 查询 |
 | `messages` | array | 是 | 至少一条消息，按对话顺序排列 |
 | `messages[].role` | string | 是 | `system`、`user` 或 `assistant` |
 | `messages[].content` | string | 是 | 消息文本 |
@@ -85,13 +86,13 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 | `stream` | boolean | 否 | 默认 `false`，本次仅支持非流式响应，`true` 返回 HTTP 422 |
 
 请求顶层不接受未定义字段，避免静默忽略不支持的功能。
-模型名称传给 DeepSeek，由上游判断模型是否可用；目前所有聊天请求均使用 DeepSeek 适配器。
+网关按逻辑模型名查找内部配置，使用对应密钥和客户端调用真实模型；不接受未配置的真实模型名。
 
 请求示例：
 
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "general-chat",
   "system_prompt": {
     "name": "assistant",
     "version": "1.0.0",
@@ -115,7 +116,7 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 | `id` | string | 上游生成的响应标识 |
 | `object` | string | 固定为 `chat.completion` |
 | `created` | integer | 上游生成响应时的 Unix 时间戳，单位为秒 |
-| `model` | string | 上游返回的模型名称 |
+| `model` | string | 调用方使用的逻辑模型名称，网关不会在此字段返回真实模型名 |
 | `choices` | array | 至少一个候选结果 |
 | `choices[].index` | integer | 非负候选索引 |
 | `choices[].message.role` | string | 固定为 `assistant` |
@@ -137,7 +138,7 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
   "id": "chatcmpl-example",
   "object": "chat.completion",
   "created": 1700000000,
-  "model": "deepseek-chat",
+  "model": "general-chat",
   "choices": [
     {
       "index": 0,
@@ -149,11 +150,11 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 }
 ```
 
-在 `.env` 中配置 `DEEPSEEK_API_KEY` 并启动服务后，可在 PowerShell 中调用：
+在 `.env` 中配置 `GENERAL_CHAT_API_KEY` 并启动服务后，可在 PowerShell 中调用：
 
 ```powershell
 $payload = @{
-    model = "deepseek-chat"
+    model = "general-chat"
     system_prompt = @{
         name = "assistant"
         version = "1.0.0"
@@ -178,7 +179,10 @@ Invoke-RestMethod -Method Post `
 | 422 | `VALIDATION_ERROR` | 请求参数不合法或请求流式响应 |
 | 404 | `PROMPT_TEMPLATE_NOT_FOUND` | 系统提示词模板名或版本不存在 |
 | 422 | `PROMPT_PARAMETER_ERROR` | 模板参数缺失或提供了未定义参数 |
-| 503 | `PROVIDER_NOT_CONFIGURED` | 未配置 DeepSeek 密钥或密钥为空白 |
+| 404 | `MODEL_NOT_FOUND` | 逻辑模型不存在，不会回退到其他模型 |
+| 503 | `MODEL_NOT_CONFIGURED` | 当前模型指定的密钥变量缺失或为空白 |
+| 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 配置中的模型不支持聊天 |
+| 422 | `MODEL_TOKEN_LIMIT_EXCEEDED` | 请求的输出 token 数超过该模型配置的上限 |
 | 429 | `UPSTREAM_RATE_LIMITED` | 上游返回限流状态 |
 | 504 | `UPSTREAM_TIMEOUT` | 上游连接、读取等操作超时 |
 | 502 | `UPSTREAM_HTTP_ERROR` | 上游返回其他非成功状态，包括上游认证失败 |
@@ -195,6 +199,27 @@ Invoke-RestMethod -Method Post `
   }
 }
 ```
+
+## 模型配置管理
+
+`config/models.json` 集中维护逻辑模型名、真实模型名、适配器类型、上游地址、超时、独立密钥环境变量名和模型能力。
+调用方通过 `GET /v1/models` 查询逻辑模型和能力，不需要知道实际模型、服务地址或密钥变量名。
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 10
+```
+
+每个模型必须指定不同的 `api_key_env`。密钥值存放在系统环境变量或本地 `.env`，不写入 JSON。
+系统环境变量优先；变量存在但为空时，不会回退到 `.env` 或其他模型的密钥。
+缺少一个模型的密钥只影响该模型的调用，不影响服务启动、查询接口、健康检查和其他模型。
+
+模型能力包含聊天、流式、工具调用、视觉、推理、结构化输出及可选的上下文窗口和输出限制。
+结构化输出通过 `structured_output.supported` 和 `structured_output.modes` 声明，模式支持 `json_object`、`json_schema`。
+本轮只维护和展示结构化输出能力，尚未开放 `response_format` 请求参数。
+模型能力声明不会自动开启网关尚未实现的流式、工具调用或多模态接口。
+
+配置加载时校验名称重复、密钥变量重复、适配器类型、地址和结构化输出模式等内容。
+修改配置或密钥后需要重启服务。详细字段、客户端创建和迁移步骤见 [模型配置管理说明](config/README.md)。
 
 ## 系统提示词管理
 
@@ -217,45 +242,23 @@ Invoke-RestMethod -Method Post `
 
 `app/adapters/base.py` 中的 `ModelAdapter` 使用 Python `Protocol` 定义接口：
 
-- `await complete(request)`：接收 `LLMRequest`，返回统一的 `LLMResponse`。
-- `stream(request)`：返回 `AsyncIterator[ChatCompletionChunk]`，供 `async for` 消费。
-- `await healthcheck()`：返回上游连通性及认证检查结果 `bool`。
+- `await complete(request)`：接收内部请求，返回统一的 `LLMResponse`。
+- `stream(request)`：预留流式返回类型，当前抛出 `NotImplementedError`。
+- `await healthcheck()`：检查上游连通性及认证，不生成聊天内容。
+- `await aclose()`：释放适配器持有的资源。
 
-请求、完整响应和流式块的类型位于 `app/schemas/chat.py`。
-原有的 `ChatCompletionRequest` / `ChatCompletionResponse` 名称作为别名保留，兼容已有调用代码。
-响应保留候选内容、结束原因、token 用量，以及 DeepSeek 可选的 `reasoning_content`。
+`app/adapters/factory.py` 根据模型配置创建 `DeepSeekChatAdapter` 或通用的 `ChatCompletionsAdapter`。
+两者使用共享的 HTTP 协议实现，采用 Bearer 认证，并在配置的 `base_url` 后追加 `/chat/completions`。
+传给适配器的请求使用真实模型名；返回客户端前，由模型注册表改回逻辑模型名。
+非成功状态、超时、网络错误及响应校验异常统一转换为网关错误；当前不自动重试。
 
-`DeepSeekChatAdapter.complete()` 使用 Bearer 认证调用上游 `POST /chat/completions`，
-固定发送 `stream=false`，并校验返回 JSON。非成功 HTTP 状态抛出 `httpx2.HTTPStatusError`，
-网络错误、超时和响应校验错误交由调用方处理；暂不自动重试。
-`healthcheck()` 调用 `GET /models`，网络错误或非成功状态返回 `False`，不会生成聊天内容。
-`stream()` 当前明确抛出 `NotImplementedError`，后续再实现 SSE 解析。
+对外路由通过依赖注入获得 `ModelRegistry`，由它按逻辑模型名选择适配器。
+应用启动时为密钥已配置的模型创建客户端，同一进程内复用，关闭时统一释放。
+部分客户端创建失败时，也会释放此前创建的客户端。
+测试可覆盖 `app/api/dependencies.py` 中的 `get_model_registry`。
 
-配置 `.env` 中的 `DEEPSEEK_API_KEY` 后，可在异步业务代码中使用：
-
-```python
-from app.adapters import DeepSeekChatAdapter, ModelAdapter
-from app.core.config import get_settings
-from app.schemas.chat import ChatMessage, LLMRequest
-
-
-async def ask_model() -> str | None:
-    async with DeepSeekChatAdapter.from_settings(get_settings()) as deepseek:
-        adapter: ModelAdapter = deepseek
-        response = await adapter.complete(
-            LLMRequest(
-                model="deepseek-chat",
-                messages=[ChatMessage(role="user", content="你好，请介绍一下自己。")],
-            )
-        )
-        return response.choices[0].message.content
-```
-
-适配器可在同一个异步上下文中复用，以复用 HTTP 连接。退出上下文时关闭自行创建的客户端；
-通过 `client=` 注入的客户端由调用方关闭。
-对外聊天接口通过依赖注入获取适配器：应用启动时创建适配器，同一进程内复用其 HTTP 连接，
-应用关闭时释放客户端。测试或后续扩展可覆盖 `app/api/dependencies.py` 中的 `get_model_adapter`。
-缺少密钥不会影响 `/health` 或应用启动，调用聊天接口时返回 HTTP 503。
+原有的 `ChatCompletionRequest` / `ChatCompletionResponse` 名称作为类型别名保留。
+`DeepSeekChatAdapter.from_settings()` 保留给原有内部调用使用；网关路由不会回退读取旧的全局 `DEEPSEEK_API_KEY`。
 
 ## 错误响应
 
@@ -300,6 +303,12 @@ uv run pytest tests/test_chat.py
 uv run pytest tests/test_prompts.py tests/test_chat.py
 ```
 
+模型配置测试覆盖能力配置、独立密钥、逻辑路由、对外模型信息和客户端释放：
+
+```powershell
+uv run pytest tests/test_models.py tests/test_config.py tests/test_chat.py
+```
+
 需要格式化时运行 `uv run ruff format .`。
 `uv.lock` 应随代码提交，新环境使用 `uv sync --locked` 安装一致的依赖版本。
 
@@ -314,13 +323,19 @@ llm-gateway/
 │   │   ├── chat.py         # POST /v1/chat/completions
 │   │   ├── dependencies.py # 模型适配器依赖
 │   │   ├── prompts.py      # GET /v1/prompts
+│   │   ├── models.py       # GET /v1/models
 │   │   └── health.py       # 健康检查
 │   ├── adapters/
 │   │   ├── base.py         # ModelAdapter 协议
-│   │   └── deepseek.py     # DeepSeek Chat Completions 实现
+│   │   ├── deepseek.py     # DeepSeek 适配器
+│   │   ├── compatible.py   # 通用 Chat Completions 协议
+│   │   └── factory.py      # 按配置创建客户端
 │   ├── schemas/
 │   │   ├── chat.py         # 统一请求、响应和流式块类型
-│   │   └── prompts.py      # 模板选择和参数协议
+│   │   ├── prompts.py      # 模板选择和参数协议
+│   │   └── models.py       # 模型配置和公开能力协议
+│   ├── models/
+│   │   └── registry.py     # 逻辑模型匹配与客户端管理
 │   ├── prompts/
 │   │   ├── registry.py     # 模板加载、匹配和渲染
 │   │   ├── README.md       # 提示词维护说明
@@ -329,6 +344,9 @@ llm-gateway/
 │       ├── config.py       # 配置加载和校验
 │       ├── logging.py      # 日志配置
 │       └── errors.py       # 异常处理
+├── config/
+│   ├── models.json        # 内部模型配置，不含密钥值
+│   └── README.md          # 模型维护说明
 ├── tests/                 # 接口与配置测试
 ├── .env.example           # 环境变量示例
 ├── .gitignore
@@ -340,4 +358,4 @@ llm-gateway/
 
 ## 下一步
 
-逐步加入流式响应、工具调用、多模态、网关鉴权和多供应商模型路由。
+逐步加入结构化输出请求、流式响应、工具调用、多模态和网关鉴权。

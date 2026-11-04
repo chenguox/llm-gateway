@@ -1,7 +1,7 @@
 """Public chat completions contract and mocked provider integration."""
 
 import json
-from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import httpx2 as httpx
@@ -9,10 +9,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.adapters.base import ModelAdapter
-from app.api.dependencies import get_model_adapter
+from app.api.dependencies import get_model_registry
 from app.core.config import Settings
 from app.main import create_app
+from app.models.registry import ModelRegistry
 from app.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -21,76 +21,11 @@ from app.schemas.chat import (
 )
 
 
-@pytest.fixture
-def completion() -> dict:
-    return {
-        "id": "chatcmpl-test",
-        "object": "chat.completion",
-        "created": 1700000000,
-        "model": "deepseek-chat",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "Hello!",
-                    "reasoning_content": "A greeting is appropriate.",
-                },
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20},
-    }
-
-
-@pytest.fixture
-def upstream_clients() -> list[httpx.AsyncClient]:
-    return []
-
-
-@pytest.fixture
-def upstream(
-    monkeypatch: pytest.MonkeyPatch,
-    completion: dict,
-    upstream_clients: list[httpx.AsyncClient],
-) -> Mock:
-    handler = Mock(return_value=httpx.Response(200, json=completion))
-    client_class = httpx.AsyncClient
-
-    def create_client() -> httpx.AsyncClient:
-        client = client_class(transport=httpx.MockTransport(handler))
-        upstream_clients.append(client)
-        return client
-
-    monkeypatch.setattr("app.adapters.deepseek.httpx.AsyncClient", create_client)
-    return handler
-
-
-@pytest.fixture
-def chat_application(upstream: Mock) -> FastAPI:
-    return create_app(
-        Settings(
-            _env_file=None,
-            environment="test",
-            log_level="WARNING",
-            deepseek_api_key="unit-test-key",
-            deepseek_base_url="https://provider.test/v1",
-            deepseek_timeout_seconds=5,
-        )
-    )
-
-
-@pytest.fixture
-def chat_client(chat_application: FastAPI) -> Iterator[TestClient]:
-    with TestClient(chat_application, raise_server_exceptions=False) as client:
-        yield client
-
-
 def test_chat_forwards_request_and_returns_unified_response(
     chat_client: TestClient, upstream: Mock, completion: dict
 ) -> None:
     payload = {
-        "model": "deepseek-chat",
+        "model": "general-chat",
         "messages": [
             {"role": "system", "content": "Be helpful."},
             {"role": "user", "content": "Hello"},
@@ -104,25 +39,29 @@ def test_chat_forwards_request_and_returns_unified_response(
     response = chat_client.post("/v1/chat/completions", json=payload)
 
     assert response.status_code == 200
-    assert response.json() == completion
+    assert response.json() == {**completion, "model": "general-chat"}
     upstream.assert_called_once()
     request = upstream.call_args.args[0]
     assert request.method == "POST"
     assert str(request.url) == "https://provider.test/v1/chat/completions"
     assert request.headers["authorization"] == "Bearer unit-test-key"
     assert request.extensions["timeout"]["read"] == 5
-    assert json.loads(request.content) == payload
+    assert json.loads(request.content) == {**payload, "model": "deepseek-chat"}
 
 
 def test_chat_defaults_to_non_streaming_and_omits_unset_options(
     chat_client: TestClient, upstream: Mock
 ) -> None:
-    payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello"}]}
+    payload = {"model": "general-chat", "messages": [{"role": "user", "content": "Hello"}]}
 
     response = chat_client.post("/v1/chat/completions", json=payload)
 
     assert response.status_code == 200
-    assert json.loads(upstream.call_args.args[0].content) == {**payload, "stream": False}
+    assert json.loads(upstream.call_args.args[0].content) == {
+        **payload,
+        "model": "deepseek-chat",
+        "stream": False,
+    }
 
 
 @pytest.mark.parametrize(
@@ -148,7 +87,7 @@ def test_chat_defaults_to_non_streaming_and_omits_unset_options(
 def test_invalid_chat_request_is_rejected_without_calling_provider(
     chat_client: TestClient, upstream: Mock, overrides: dict
 ) -> None:
-    payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello"}]}
+    payload = {"model": "general-chat", "messages": [{"role": "user", "content": "Hello"}]}
 
     response = chat_client.post("/v1/chat/completions", json={**payload, **overrides})
 
@@ -158,7 +97,7 @@ def test_invalid_chat_request_is_rejected_without_calling_provider(
     upstream.assert_not_called()
 
 
-@pytest.mark.parametrize("body", [{}, {"model": "deepseek-chat"}, None])
+@pytest.mark.parametrize("body", [{}, {"model": "general-chat"}, None])
 def test_missing_chat_fields_are_rejected(
     chat_client: TestClient, upstream: Mock, body: dict | None
 ) -> None:
@@ -170,16 +109,22 @@ def test_missing_chat_fields_are_rejected(
 
 
 @pytest.mark.parametrize("api_key", [None, "", "   "])
-def test_missing_provider_configuration_keeps_health_available(api_key: str | None) -> None:
-    application = create_app(Settings(_env_file=None, deepseek_api_key=api_key))
+def test_missing_model_configuration_keeps_health_available(
+    api_key: str | None,
+    model_config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if api_key is not None:
+        monkeypatch.setenv("TEST_GENERAL_CHAT_API_KEY", api_key)
+    application = create_app(Settings(_env_file=None, models_config_path=model_config_path))
     with TestClient(application, raise_server_exceptions=False) as client:
         response = client.post(
             "/v1/chat/completions",
-            json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello"}]},
+            json={"model": "general-chat", "messages": [{"role": "user", "content": "Hello"}]},
         )
         assert response.status_code == 503
-        assert response.json()["error"]["code"] == "PROVIDER_NOT_CONFIGURED"
-        assert "DEEPSEEK_API_KEY" not in response.text
+        assert response.json()["error"]["code"] == "MODEL_NOT_CONFIGURED"
+        assert "TEST_GENERAL_CHAT_API_KEY" not in response.text
         assert client.get("/health").status_code == 200
 
 
@@ -193,7 +138,7 @@ def test_upstream_http_errors_are_mapped_and_sanitized(
 
     response = chat_client.post(
         "/v1/chat/completions",
-        json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello"}]},
+        json={"model": "general-chat", "messages": [{"role": "user", "content": "Hello"}]},
     )
 
     assert response.status_code == (429 if status == 429 else 502)
@@ -220,7 +165,7 @@ def test_upstream_network_errors_are_mapped_and_sanitized(
 
     response = chat_client.post(
         "/v1/chat/completions",
-        json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello"}]},
+        json={"model": "general-chat", "messages": [{"role": "user", "content": "Hello"}]},
     )
 
     assert response.status_code == status
@@ -245,7 +190,7 @@ def test_invalid_upstream_response_returns_bad_gateway(
 
     response = chat_client.post(
         "/v1/chat/completions",
-        json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello"}]},
+        json={"model": "general-chat", "messages": [{"role": "user", "content": "Hello"}]},
     )
 
     assert response.status_code == 502
@@ -264,40 +209,39 @@ def test_response_preserves_optional_fields_and_provider_extensions(
 
     response = chat_client.post(
         "/v1/chat/completions",
-        json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello"}]},
+        json={"model": "general-chat", "messages": [{"role": "user", "content": "Hello"}]},
     )
 
     assert response.status_code == 200
-    assert response.json() == completion
+    assert response.json() == {**completion, "model": "general-chat"}
 
 
 def test_http_client_is_reused_and_closed_with_application(
     chat_application: FastAPI, upstream: Mock, upstream_clients: list[httpx.AsyncClient]
 ) -> None:
     with TestClient(chat_application) as client:
-        assert len(upstream_clients) == 1
-        assert not upstream_clients[0].is_closed
-        adapter = chat_application.state.model_adapter
+        assert len(upstream_clients) == 2
+        assert all(not upstream_client.is_closed for upstream_client in upstream_clients)
+        adapter = chat_application.state.model_registry.get_adapter("general-chat")
         for _ in range(2):
             response = client.post(
                 "/v1/chat/completions",
-                json={"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hi"}]},
+                json={"model": "general-chat", "messages": [{"role": "user", "content": "Hi"}]},
             )
             assert response.status_code == 200
-            assert chat_application.state.model_adapter is adapter
-        assert len(upstream_clients) == 1
+            assert chat_application.state.model_registry.get_adapter("general-chat") is adapter
+        assert len(upstream_clients) == 2
         assert upstream.call_count == 2
 
-    assert upstream_clients[0].is_closed
-    assert chat_application.state.model_adapter is None
+    assert all(upstream_client.is_closed for upstream_client in upstream_clients)
 
 
-def test_adapter_dependency_can_be_overridden(
+def test_model_registry_dependency_can_be_overridden(
     application: FastAPI, client: TestClient, completion: dict
 ) -> None:
-    adapter = AsyncMock(spec=ModelAdapter)
-    adapter.complete.return_value = LLMResponse.model_validate(completion)
-    application.dependency_overrides[get_model_adapter] = lambda: adapter
+    registry = AsyncMock(spec=ModelRegistry)
+    registry.complete.return_value = LLMResponse.model_validate(completion)
+    application.dependency_overrides[get_model_registry] = lambda: registry
 
     response = client.post(
         "/v1/chat/completions",
@@ -305,9 +249,9 @@ def test_adapter_dependency_can_be_overridden(
     )
 
     assert response.status_code == 200
-    adapter.complete.assert_awaited_once()
-    assert isinstance(adapter.complete.call_args.args[0], LLMRequest)
-    assert adapter.complete.call_args.args[0].model == "test-model"
+    registry.complete.assert_awaited_once()
+    assert isinstance(registry.complete.call_args.args[0], LLMRequest)
+    assert registry.complete.call_args.args[0].model == "test-model"
 
 
 def test_openapi_exposes_unified_chat_protocol(client: TestClient) -> None:
@@ -333,7 +277,7 @@ def test_selected_prompt_replaces_system_messages_before_calling_provider(
     response = chat_client.post(
         "/v1/chat/completions",
         json={
-            "model": "deepseek-chat",
+            "model": "general-chat",
             "system_prompt": {
                 "name": "customer_support",
                 "version": "1.0.0",
@@ -351,7 +295,7 @@ def test_selected_prompt_replaces_system_messages_before_calling_provider(
     )
 
     assert response.status_code == 200
-    assert response.json() == completion
+    assert response.json() == {**completion, "model": "general-chat"}
     upstream.assert_called_once()
     payload = json.loads(upstream.call_args.args[0].content)
     assert payload == {
@@ -388,7 +332,7 @@ def test_selected_prompt_uses_exact_version_and_default_parameters(
     response = chat_client.post(
         "/v1/chat/completions",
         json={
-            "model": "deepseek-chat",
+            "model": "general-chat",
             "system_prompt": {"name": "assistant", "version": version},
             "messages": [{"role": "user", "content": "Hello"}],
         },
@@ -425,7 +369,7 @@ def test_prompt_errors_prevent_upstream_calls(
     response = chat_client.post(
         "/v1/chat/completions",
         json={
-            "model": "deepseek-chat",
+            "model": "general-chat",
             "system_prompt": selection,
             "messages": [{"role": "user", "content": "Hello"}],
         },

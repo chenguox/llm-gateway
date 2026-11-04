@@ -2,6 +2,7 @@
 
 from pydantic import SecretStr
 
+from app.adapters.anthropic import AnthropicMessagesAdapter
 from app.adapters.base import ModelAdapter
 from app.adapters.compatible import ChatCompletionsAdapter
 from app.adapters.deepseek import DeepSeekChatAdapter
@@ -12,6 +13,7 @@ def create_adapter(configuration: ModelConfiguration, api_key: SecretStr) -> Mod
     adapter_class = {
         "deepseek": DeepSeekChatAdapter,
         "openai_compatible": ChatCompletionsAdapter,
+        "anthropic": AnthropicMessagesAdapter,
     }[configuration.provider]
     return adapter_class(
         api_key=api_key.get_secret_value(),

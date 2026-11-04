@@ -6,7 +6,8 @@
 健康检查只确认 HTTP 服务正在运行，不检查外部模型服务。
 通过统一的 `LLMRequest` / `LLMResponse` 协议和 `POST /v1/chat/completions` 接口，
 按逻辑模型名匹配内部配置、独立密钥和模型客户端。
-目前支持文本聊天和非流式响应。
+目前支持文本聊天和非流式响应，上游可使用 Chat Completions 或 Anthropic Messages 协议。
+内置逻辑模型 `flash-chat` 使用 Messages 协议调用 DeepSeek V4 Flash。
 
 ## 环境要求
 
@@ -57,6 +58,7 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 | `MODELS_CONFIG_PATH` | 项目下的 `config/models.json` | 模型配置文件路径，默认路径不依赖工作目录 |
 | `GENERAL_CHAT_API_KEY` | 空 | 示例逻辑模型 `general-chat` 的独立密钥 |
 | `CODING_ASSISTANT_API_KEY` | 空 | 示例逻辑模型 `coding-assistant` 的独立密钥 |
+| `FLASH_CHAT_API_KEY` | 空 | 示例逻辑模型 `flash-chat` 的独立密钥，使用 DeepSeek Messages 接口 |
 
 `ENVIRONMENT` 目前仅作为环境标识，不会自动切换部署配置。监听地址和端口通过 Uvicorn 参数设置；
 Uvicorn 自身日志级别可用 `--log-level` 设置。
@@ -82,7 +84,7 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 | `system_prompt.parameters` | object | 否 | 模板参数，默认 `{}`，支持 JSON 值 |
 | `temperature` | number / null | 否 | 范围 0～2；省略或为 null 时不传给上游 |
 | `top_p` | number / null | 否 | 范围 0～1；省略或为 null 时不传给上游 |
-| `max_tokens` | integer / null | 否 | 正整数；省略或为 null 时不传给上游 |
+| `max_tokens` | integer / null | 否 | 正整数；省略或为 null 时使用模型配置的输出上限；未配置上限时 Messages 默认 1024，Chat Completions 不传 |
 | `stream` | boolean | 否 | 默认 `false`，本次仅支持非流式响应，`true` 返回 HTTP 422 |
 
 请求顶层不接受未定义字段，避免静默忽略不支持的功能。
@@ -183,6 +185,7 @@ Invoke-RestMethod -Method Post `
 | 503 | `MODEL_NOT_CONFIGURED` | 当前模型指定的密钥变量缺失或为空白 |
 | 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 配置中的模型不支持聊天 |
 | 422 | `MODEL_TOKEN_LIMIT_EXCEEDED` | 请求的输出 token 数超过该模型配置的上限 |
+| 422 | `INVALID_MESSAGES` | Messages 协议请求只有 system 消息，缺少用户或助手消息 |
 | 429 | `UPSTREAM_RATE_LIMITED` | 上游返回限流状态 |
 | 504 | `UPSTREAM_TIMEOUT` | 上游连接、读取等操作超时 |
 | 502 | `UPSTREAM_HTTP_ERROR` | 上游返回其他非成功状态，包括上游认证失败 |
@@ -221,6 +224,30 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 10
 配置加载时校验名称重复、密钥变量重复、适配器类型、地址和结构化输出模式等内容。
 修改配置或密钥后需要重启服务。详细字段、客户端创建和迁移步骤见 [模型配置管理说明](config/README.md)。
 
+### DeepSeek V4 Flash：Messages 协议
+
+在本地 `.env` 或部署环境中设置 `FLASH_CHAT_API_KEY`，然后重启服务。
+调用方仍请求 `POST /v1/chat/completions`，将逻辑模型设为 `flash-chat`：
+
+```json
+{
+  "model": "flash-chat",
+  "system_prompt": {
+    "name": "assistant",
+    "version": "1.0.0",
+    "parameters": {"language": "中文"}
+  },
+  "messages": [{"role": "user", "content": "你好，请介绍一下自己。"}],
+  "max_tokens": 1024
+}
+```
+
+网关匹配该模型的独立配置和密钥，将系统提示词转为顶层 `system`，
+向 `https://api.deepseek.com/anthropic/v1/messages` 发送 Messages 请求，再转换为统一 `LLMResponse`。
+默认配置的输出上限为 8192，这是网关限制，不代表供应商最大输出能力。
+截至 2026-11-04，DeepSeek 官方仍接受 `deepseek-v4-flash`，但对应请求由 V4.1 Flash 承接；
+该配置保留用户指定的模型标识，不能用于锁定原始 V4 版本。详见 [模型配置管理说明](config/README.md)。
+
 ## 系统提示词管理
 
 使用 `GET /v1/prompts` 查看可选模板、版本和参数要求，不需要模型密钥。
@@ -247,8 +274,17 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 10
 - `await healthcheck()`：检查上游连通性及认证，不生成聊天内容。
 - `await aclose()`：释放适配器持有的资源。
 
-`app/adapters/factory.py` 根据模型配置创建 `DeepSeekChatAdapter` 或通用的 `ChatCompletionsAdapter`。
-两者使用共享的 HTTP 协议实现，采用 Bearer 认证，并在配置的 `base_url` 后追加 `/chat/completions`。
+`app/adapters/factory.py` 根据模型配置创建适配器：
+
+- `deepseek` / `openai_compatible`：创建 `DeepSeekChatAdapter` / `ChatCompletionsAdapter`，采用 Bearer 认证，在 `base_url` 后追加 `/chat/completions`。
+- `anthropic`：创建 `AnthropicMessagesAdapter`，采用 `x-api-key` 和 `anthropic-version: 2023-06-01`，调用 `/v1/messages`；`base_url` 已含 `/v1` 时不会重复追加。
+
+Messages 响应的文本块合并为 `content`，可见推理块合并为 `reasoning_content`，加密推理块不向调用方输出。
+结束原因和 token 用量转换为统一字段；输入用量包含缓存创建与读取 token。
+Messages 不提供创建时间，因此 `created` 为网关处理响应时的 Unix 秒数。
+上游返回当前未支持的内容块（例如工具调用）时，返回 `UPSTREAM_INVALID_RESPONSE`。
+适配器的健康检查使用模型列表接口；兼容服务未实现该接口时返回 false，不影响正常聊天或服务 `/health`。
+
 传给适配器的请求使用真实模型名；返回客户端前，由模型注册表改回逻辑模型名。
 非成功状态、超时、网络错误及响应校验异常统一转换为网关错误；当前不自动重试。
 
@@ -289,6 +325,7 @@ DeepSeek 单元测试使用 `httpx2.MockTransport` 模拟上游，验证请求�
 
 ```powershell
 uv run pytest tests/test_deepseek_adapter.py
+uv run pytest tests/test_anthropic_adapter.py
 ```
 
 聊天接口测试还覆盖统一协议、参数校验、上游错误映射、连接生命周期和依赖替换：

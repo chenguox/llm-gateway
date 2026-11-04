@@ -31,6 +31,23 @@
         "reasoning": false,
         "structured_output": {"supported": false, "modes": []}
       }
+    },
+    {
+      "logical_name": "flash-chat",
+      "provider": "anthropic",
+      "model": "deepseek-v4-flash",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "api_key_env": "FLASH_CHAT_API_KEY",
+      "timeout_seconds": 60,
+      "capabilities": {
+        "chat": true,
+        "streaming": false,
+        "tools": false,
+        "vision": false,
+        "reasoning": true,
+        "structured_output": {"supported": false, "modes": []},
+        "max_output_tokens": 8192
+      }
     }
   ]
 }

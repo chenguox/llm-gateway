@@ -118,7 +118,11 @@ def test_default_model_config_path_is_independent_of_working_directory(
 
     registry = ModelRegistry.from_file(Settings(_env_file=None).models_config_path)
 
-    assert {model.id for model in registry.list_models()} == {"general-chat", "coding-assistant"}
+    assert {model.id for model in registry.list_models()} == {
+        "general-chat",
+        "coding-assistant",
+        "flash-chat",
+    }
 
 
 def test_model_catalog_exposes_only_logical_names_and_capabilities(client: TestClient) -> None:

@@ -73,7 +73,7 @@ class ModelConfiguration(ConfigurationModel):
     # 调用方使用的逻辑模型名，注册表使用该名称进行精确查找。
     logical_name: ModelName
     # 决定由客户端工厂创建哪一种适配器，而非真实模型的名称。
-    provider: Literal["deepseek", "openai_compatible"]
+    provider: Literal["deepseek", "openai_compatible", "anthropic"]
     # 仅在网关内部使用，发起上游请求时替换逻辑模型名。
     model: ModelName
     # 上游服务根地址或 API 前缀，由适配器追加具体接口路径。

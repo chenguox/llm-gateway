@@ -325,3 +325,113 @@ def test_openapi_exposes_unified_chat_protocol(client: TestClient) -> None:
 def test_previous_protocol_names_remain_compatible() -> None:
     assert ChatCompletionRequest is LLMRequest
     assert ChatCompletionResponse is LLMResponse
+
+
+def test_selected_prompt_replaces_system_messages_before_calling_provider(
+    chat_client: TestClient, upstream: Mock, completion: dict
+) -> None:
+    response = chat_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "deepseek-chat",
+            "system_prompt": {
+                "name": "customer_support",
+                "version": "1.0.0",
+                "parameters": {"product": "示例产品", "language": "中文"},
+            },
+            "messages": [
+                {"role": "system", "content": "old system"},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "system", "content": "another old system"},
+                {"role": "user", "content": "How can I use it?"},
+            ],
+            "max_tokens": 128,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == completion
+    upstream.assert_called_once()
+    payload = json.loads(upstream.call_args.args[0].content)
+    assert payload == {
+        "model": "deepseek-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "你是示例产品的客服助手。请使用中文回答用户的问题，不要编造产品功能或服务承诺。"
+                ),
+            },
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "How can I use it?"},
+        ],
+        "max_tokens": 128,
+        "stream": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("version", "expected"),
+    [
+        ("1.0.0", "你是一名通用助手。请使用中文回答用户的问题。"),
+        (
+            "2.0.0",
+            "你是一名通用助手。请使用中文回答，表达风格为简洁。回答应准确、清晰；不确定时说明不确定性。",
+        ),
+    ],
+)
+def test_selected_prompt_uses_exact_version_and_default_parameters(
+    chat_client: TestClient, upstream: Mock, version: str, expected: str
+) -> None:
+    response = chat_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "deepseek-chat",
+            "system_prompt": {"name": "assistant", "version": version},
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(upstream.call_args.args[0].content)
+    assert payload["messages"][0] == {"role": "system", "content": expected}
+    assert payload["messages"][1] == {"role": "user", "content": "Hello"}
+    assert "system_prompt" not in payload
+
+
+@pytest.mark.parametrize(
+    ("selection", "status", "code"),
+    [
+        ({"name": "missing", "version": "1.0.0"}, 404, "PROMPT_TEMPLATE_NOT_FOUND"),
+        ({"name": "assistant", "version": "latest"}, 404, "PROMPT_TEMPLATE_NOT_FOUND"),
+        ({"name": "customer_support", "version": "1.0.0"}, 422, "PROMPT_PARAMETER_ERROR"),
+        (
+            {"name": "assistant", "version": "1.0.0", "parameters": {"unknown": "private-value"}},
+            422,
+            "PROMPT_PARAMETER_ERROR",
+        ),
+        ({"name": "assistant"}, 422, "VALIDATION_ERROR"),
+        ({"version": "1.0.0"}, 422, "VALIDATION_ERROR"),
+        ({"name": "", "version": "1.0.0"}, 422, "VALIDATION_ERROR"),
+        ({"name": "assistant", "version": " "}, 422, "VALIDATION_ERROR"),
+        ({"name": "assistant", "version": "1.0.0", "parameters": []}, 422, "VALIDATION_ERROR"),
+    ],
+)
+def test_prompt_errors_prevent_upstream_calls(
+    chat_client: TestClient, upstream: Mock, selection: dict, status: int, code: str
+) -> None:
+    response = chat_client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "deepseek-chat",
+            "system_prompt": selection,
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    )
+
+    assert response.status_code == status
+    assert response.json()["error"]["code"] == code
+    assert "private-value" not in response.text
+    upstream.assert_not_called()

@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from app.schemas.prompts import PromptSelection
+
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
@@ -15,6 +17,11 @@ class LLMRequest(BaseModel):
 
     model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     messages: list[ChatMessage] = Field(min_length=1)
+    system_prompt: PromptSelection | None = Field(
+        default=None,
+        exclude=True,
+        description="Select a versioned system prompt template to replace system messages.",
+    )
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
     max_tokens: int | None = Field(default=None, gt=0)

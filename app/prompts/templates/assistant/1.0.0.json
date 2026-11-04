@@ -1,0 +1,10 @@
+{
+  "name": "assistant",
+  "version": "1.0.0",
+  "description": "通用助手，可配置角色和回答语言。",
+  "content": "你是一名${role}。请使用${language}回答用户的问题。",
+  "parameters": {
+    "role": {"description": "助手角色", "required": false, "default": "通用助手"},
+    "language": {"description": "回答语言", "required": false, "default": "中文"}
+  }
+}

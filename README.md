@@ -2,7 +2,7 @@
 
 基于 Python、FastAPI 和 uv 的 LLM Gateway 项目骨架，按功能逐步完善。
 
-当前包含健康检查、环境变量配置、控制台日志、统一错误响应、自动 API 文档和聊天接口。
+当前包含健康检查、环境变量配置、控制台日志、统一错误响应、系统提示词管理、自动 API 文档和聊天接口。
 健康检查只确认 HTTP 服务正在运行，不检查外部模型服务。
 通过统一的 `LLMRequest` / `LLMResponse` 协议和 `POST /v1/chat/completions` 接口调用 DeepSeek。
 目前支持文本聊天和非流式响应。
@@ -75,6 +75,10 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 | `messages` | array | 是 | 至少一条消息，按对话顺序排列 |
 | `messages[].role` | string | 是 | `system`、`user` 或 `assistant` |
 | `messages[].content` | string | 是 | 消息文本 |
+| `system_prompt` | object / null | 否 | 选择系统提示词模板，仅由网关处理，不转发给上游 |
+| `system_prompt.name` | string | 选择模板时必填 | 模板名称，例如 `assistant` |
+| `system_prompt.version` | string | 选择模板时必填 | 精确版本，例如 `1.0.0` |
+| `system_prompt.parameters` | object | 否 | 模板参数，默认 `{}`，支持 JSON 值 |
 | `temperature` | number / null | 否 | 范围 0～2；省略或为 null 时不传给上游 |
 | `top_p` | number / null | 否 | 范围 0～1；省略或为 null 时不传给上游 |
 | `max_tokens` | integer / null | 否 | 正整数；省略或为 null 时不传给上游 |
@@ -88,8 +92,12 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 ```json
 {
   "model": "deepseek-chat",
+  "system_prompt": {
+    "name": "assistant",
+    "version": "1.0.0",
+    "parameters": {"role": "友好的助手", "language": "中文"}
+  },
   "messages": [
-    {"role": "system", "content": "你是一个友好的助手。"},
     {"role": "user", "content": "你好，请介绍一下自己。"}
   ],
   "temperature": 0.7,
@@ -146,6 +154,11 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 ```powershell
 $payload = @{
     model = "deepseek-chat"
+    system_prompt = @{
+        name = "assistant"
+        version = "1.0.0"
+        parameters = @{ role = "友好的助手"; language = "中文" }
+    }
     messages = @(@{ role = "user"; content = "你好，请介绍一下自己。" })
     max_tokens = 128
 } | ConvertTo-Json -Depth 5
@@ -163,6 +176,8 @@ Invoke-RestMethod -Method Post `
 | HTTP 状态码 | `error.code` | 场景 |
 | --- | --- | --- |
 | 422 | `VALIDATION_ERROR` | 请求参数不合法或请求流式响应 |
+| 404 | `PROMPT_TEMPLATE_NOT_FOUND` | 系统提示词模板名或版本不存在 |
+| 422 | `PROMPT_PARAMETER_ERROR` | 模板参数缺失或提供了未定义参数 |
 | 503 | `PROVIDER_NOT_CONFIGURED` | 未配置 DeepSeek 密钥或密钥为空白 |
 | 429 | `UPSTREAM_RATE_LIMITED` | 上游返回限流状态 |
 | 504 | `UPSTREAM_TIMEOUT` | 上游连接、读取等操作超时 |
@@ -180,6 +195,23 @@ Invoke-RestMethod -Method Post `
   }
 }
 ```
+
+## 系统提示词管理
+
+使用 `GET /v1/prompts` 查看可选模板、版本和参数要求，不需要模型密钥。
+当前内置 `assistant` 的 `1.0.0` / `2.0.0` 版本，以及 `customer_support` 的 `1.0.0` 版本。
+
+模板集中维护在 `app/prompts/templates/<模板名>/<版本>.json`，不需要改动接口或适配器代码。
+模板正文通过 `${参数名}` 替换参数，支持必填参数和默认值。
+详细格式及维护步骤见 [系统提示词管理说明](app/prompts/README.md)。
+
+收到 `system_prompt` 后，网关精确查找模板版本、校验参数并渲染正文，
+替换原有全部 `system` 消息，将结果放在 `messages` 首位，随后调用模型。
+用户与助手的历史消息保持顺序，模板选择信息不会发送给上游。
+未传 `system_prompt` 或传 null 时，兼容原有行为，原消息不变。
+模板或参数错误时直接返回错误，不调用模型。
+
+模板在应用创建时加载，修改后需要重启服务。重复版本或无效模板会在加载时报告错误。
 
 ## 内部模型适配器
 
@@ -262,6 +294,12 @@ uv run pytest tests/test_deepseek_adapter.py
 uv run pytest tests/test_chat.py
 ```
 
+系统提示词测试覆盖模板加载、精确版本、默认参数、JSON 参数、请求消息构建和模板列表：
+
+```powershell
+uv run pytest tests/test_prompts.py tests/test_chat.py
+```
+
 需要格式化时运行 `uv run ruff format .`。
 `uv.lock` 应随代码提交，新环境使用 `uv sync --locked` 安装一致的依赖版本。
 
@@ -275,12 +313,18 @@ llm-gateway/
 │   │   ├── router.py       # 路由汇总
 │   │   ├── chat.py         # POST /v1/chat/completions
 │   │   ├── dependencies.py # 模型适配器依赖
+│   │   ├── prompts.py      # GET /v1/prompts
 │   │   └── health.py       # 健康检查
 │   ├── adapters/
 │   │   ├── base.py         # ModelAdapter 协议
 │   │   └── deepseek.py     # DeepSeek Chat Completions 实现
 │   ├── schemas/
-│   │   └── chat.py         # 统一请求、响应和流式块类型
+│   │   ├── chat.py         # 统一请求、响应和流式块类型
+│   │   └── prompts.py      # 模板选择和参数协议
+│   ├── prompts/
+│   │   ├── registry.py     # 模板加载、匹配和渲染
+│   │   ├── README.md       # 提示词维护说明
+│   │   └── templates/      # 按名称和版本维护的 JSON 模板
 │   └── core/
 │       ├── config.py       # 配置加载和校验
 │       ├── logging.py      # 日志配置

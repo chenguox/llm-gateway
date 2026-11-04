@@ -8,8 +8,9 @@ from fastapi import APIRouter, Depends
 from pydantic import ValidationError
 
 from app.adapters.base import ModelAdapter
-from app.api.dependencies import get_model_adapter
+from app.api.dependencies import get_model_adapter, get_prompt_registry
 from app.core.errors import GatewayError
+from app.prompts.registry import PromptRegistry
 from app.schemas.chat import LLMRequest, LLMResponse
 
 router = APIRouter(prefix="/v1", tags=["chat"])
@@ -19,7 +20,9 @@ router = APIRouter(prefix="/v1", tags=["chat"])
 async def chat_completions(
     request: LLMRequest,
     adapter: Annotated[ModelAdapter, Depends(get_model_adapter)],
+    prompts: Annotated[PromptRegistry, Depends(get_prompt_registry)],
 ) -> LLMResponse:
+    request = prompts.build_request(request)
     try:
         return await adapter.complete(request)
     except httpx.TimeoutException as exc:

@@ -10,6 +10,7 @@ from app.api.router import api_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
+from app.prompts.registry import PromptRegistry
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -33,6 +34,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
     application.state.settings = settings
     application.state.model_adapter = None
+    application.state.prompt_registry = PromptRegistry()
     register_exception_handlers(application)
     application.include_router(api_router)
     return application

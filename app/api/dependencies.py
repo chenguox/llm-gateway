@@ -4,6 +4,11 @@ from fastapi import Request
 
 from app.adapters.base import ModelAdapter
 from app.core.errors import GatewayError
+from app.prompts.registry import PromptRegistry
+
+
+def get_prompt_registry(request: Request) -> PromptRegistry:
+    return request.app.state.prompt_registry
 
 
 def get_model_adapter(request: Request) -> ModelAdapter:

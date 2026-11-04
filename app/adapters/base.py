@@ -3,15 +3,15 @@
 from collections.abc import AsyncIterator
 from typing import Protocol
 
-from app.schemas.chat import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
+from app.schemas.chat import ChatCompletionChunk, LLMRequest, LLMResponse
 
 
 class ModelAdapter(Protocol):
-    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+    async def complete(self, request: LLMRequest) -> LLMResponse:
         """Send a non-streaming chat completion request."""
         ...
 
-    def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
+    def stream(self, request: LLMRequest) -> AsyncIterator[ChatCompletionChunk]:
         """Return an async iterator of chat completion chunks."""
         ...
 

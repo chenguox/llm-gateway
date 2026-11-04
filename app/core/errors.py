@@ -12,6 +12,16 @@ from starlette.exceptions import HTTPException
 logger = logging.getLogger(__name__)
 
 
+class GatewayError(Exception):
+    """An expected gateway failure with a public, sanitized error message."""
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+
+
 def error_response(
     status_code: int,
     code: str,
@@ -24,6 +34,10 @@ def error_response(
     if details is not None:
         error["details"] = jsonable_encoder(details)
     return JSONResponse(status_code=status_code, content={"error": error}, headers=headers)
+
+
+async def gateway_exception_handler(request: Request, exc: GatewayError) -> JSONResponse:
+    return error_response(exc.status_code, exc.code, exc.message)
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
@@ -58,6 +72,7 @@ async def unexpected_exception_handler(request: Request, exc: Exception) -> JSON
 
 
 def register_exception_handlers(application: FastAPI) -> None:
+    application.add_exception_handler(GatewayError, gateway_exception_handler)
     application.add_exception_handler(HTTPException, http_exception_handler)
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
     application.add_exception_handler(Exception, unexpected_exception_handler)

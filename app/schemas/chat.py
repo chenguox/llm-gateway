@@ -1,8 +1,8 @@
 """Typed chat completion requests, responses and future stream chunks."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 class ChatMessage(BaseModel):
@@ -10,12 +10,15 @@ class ChatMessage(BaseModel):
     content: str
 
 
-class ChatCompletionRequest(BaseModel):
-    model: str = Field(min_length=1)
+class LLMRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
     messages: list[ChatMessage] = Field(min_length=1)
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
     max_tokens: int | None = Field(default=None, gt=0)
+    stream: Literal[False] = False
 
 
 class AssistantMessage(BaseModel):
@@ -40,7 +43,7 @@ class ChatCompletionChoice(BaseModel):
     finish_reason: str | None = None
 
 
-class ChatCompletionResponse(BaseModel):
+class LLMResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str
@@ -49,6 +52,10 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice] = Field(min_length=1)
     usage: ChatCompletionUsage | None = None
+
+
+ChatCompletionRequest = LLMRequest
+ChatCompletionResponse = LLMResponse
 
 
 class ChatCompletionDelta(BaseModel):

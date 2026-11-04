@@ -7,7 +7,7 @@ from typing import Self
 import httpx2 as httpx
 
 from app.core.config import Settings
-from app.schemas.chat import ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse
+from app.schemas.chat import ChatCompletionChunk, LLMRequest, LLMResponse
 
 
 class DeepSeekChatAdapter:
@@ -42,9 +42,10 @@ class DeepSeekChatAdapter:
             client=client,
         )
 
-    async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
+    async def complete(self, request: LLMRequest) -> LLMResponse:
         """Send one request and validate the upstream completion response."""
         payload = request.model_dump(mode="json", exclude_none=True)
+
         payload["stream"] = False
         response = await self._client.post(
             f"{self._base_url}/chat/completions",
@@ -53,9 +54,9 @@ class DeepSeekChatAdapter:
             timeout=self._timeout,
         )
         response.raise_for_status()
-        return ChatCompletionResponse.model_validate(response.json())
+        return LLMResponse.model_validate(response.json())
 
-    def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
+    def stream(self, request: LLMRequest) -> AsyncIterator[ChatCompletionChunk]:
         """Reserved for future SSE support."""
         raise NotImplementedError("DeepSeek streaming is not implemented yet")
 

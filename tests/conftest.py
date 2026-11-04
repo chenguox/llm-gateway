@@ -111,7 +111,7 @@ def upstream(
     handler = Mock(return_value=httpx.Response(200, json=completion))
     client_class = httpx.AsyncClient
 
-    def create_client() -> httpx.AsyncClient:
+    def create_client(**kwargs: object) -> httpx.AsyncClient:
         client = client_class(transport=httpx.MockTransport(handler))
         upstream_clients.append(client)
         return client

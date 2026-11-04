@@ -10,6 +10,7 @@ from app.core.config import Settings
 from app.core.errors import GatewayError
 from app.schemas.chat import LLMRequest, LLMResponse
 from app.schemas.models import LogicalModelInfo, ModelConfiguration, ModelsConfiguration
+from app.structured_output.service import complete_structured
 
 
 class ModelRegistry:
@@ -97,6 +98,10 @@ class ModelRegistry:
                 "max_tokens": request.max_tokens if request.max_tokens is not None else limit,
             }
         )
-        response = await self.get_adapter(request.model).complete(upstream_request)
+        adapter = self.get_adapter(request.model)
+        if request.response_format is None:
+            response = await adapter.complete(upstream_request)
+        else:
+            response = await complete_structured(adapter, configuration, upstream_request)
         # 对外的 model 字段始终使用逻辑名，调用方无需依赖供应商的真实模型名称。
         return response.model_copy(update={"model": request.model})

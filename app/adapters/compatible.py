@@ -7,6 +7,8 @@ from typing import Self
 import httpx2 as httpx
 
 from app.schemas.chat import ChatCompletionChunk, LLMRequest, LLMResponse
+from app.schemas.structured_output import JsonSchemaFormat
+from app.structured_output.formats import native_schema
 
 
 class ChatCompletionsAdapter:
@@ -32,7 +34,11 @@ class ChatCompletionsAdapter:
         self._timeout = timeout
         # 注入的客户端由调用方管理；适配器只负责关闭自己创建的客户端。
         self._owns_client = client is None
-        self._client = client if client is not None else httpx.AsyncClient()
+        self._client = (
+            client
+            if client is not None
+            else httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0))
+        )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """将统一请求发送给上游，并将上游 JSON 校验为统一响应。"""
@@ -40,6 +46,18 @@ class ChatCompletionsAdapter:
         payload = request.model_dump(mode="json", exclude_none=True)
         # 当前仅实现非流式调用，确保上游返回完整 JSON 而不是事件流。
         payload["stream"] = False
+        if isinstance(request.response_format, JsonSchemaFormat):
+            specification = request.response_format.json_schema
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": specification.name,
+                    "strict": True,
+                    "schema": native_schema(specification.schema_, require_all=True),
+                },
+            }
+        elif request.response_format is not None:
+            payload["response_format"] = {"type": request.response_format.type}
         response = await self._client.post(
             f"{self._base_url}/chat/completions",
             headers=self._headers,

@@ -13,7 +13,7 @@
         "tools": false,
         "vision": false,
         "reasoning": false,
-        "structured_output": {"supported": false, "modes": []}
+        "structured_output": {"supported": true, "modes": ["json_object"]}
       }
     },
     {
@@ -29,7 +29,7 @@
         "tools": false,
         "vision": false,
         "reasoning": false,
-        "structured_output": {"supported": false, "modes": []}
+        "structured_output": {"supported": true, "modes": ["json_object"]}
       }
     },
     {

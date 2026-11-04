@@ -21,6 +21,8 @@ from app.schemas.chat import (
     LLMRequest,
     LLMResponse,
 )
+from app.schemas.structured_output import JsonSchemaFormat
+from app.structured_output.formats import native_schema
 
 
 class AnthropicMessagesAdapter:
@@ -55,7 +57,11 @@ class AnthropicMessagesAdapter:
         self._default_max_tokens = default_max_tokens
         # 内部创建的客户端由适配器关闭；注入客户端由其创建方管理。
         self._owns_client = client is None
-        self._client = client if client is not None else httpx.AsyncClient()
+        self._client = (
+            client
+            if client is not None
+            else httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(retries=0))
+        )
 
     async def complete(self, request: LLMRequest) -> LLMResponse:
         """提取顶层 system，保留对话历史，并调用上游 /v1/messages。"""
@@ -86,6 +92,19 @@ class AnthropicMessagesAdapter:
             if value is not None:
                 # 只跳过 None，保留 0 等有效采样值；模板选择信息不会进入上游请求体。
                 payload[name] = value
+        if isinstance(request.response_format, JsonSchemaFormat):
+            payload["output_config"] = {
+                "format": {
+                    "type": "json_schema",
+                    "schema": native_schema(
+                        request.response_format.json_schema.schema_, require_all=False
+                    ),
+                }
+            }
+        elif request.response_format is not None:
+            raise GatewayError(
+                422, "MODEL_CAPABILITY_NOT_SUPPORTED", "Messages does not support JSON object mode"
+            )
         response = await self._client.post(
             f"{self._api_url}/messages",
             headers=self._headers,

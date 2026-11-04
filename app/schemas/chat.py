@@ -2,9 +2,10 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from app.schemas.prompts import PromptSelection
+from app.schemas.structured_output import ResponseFormat
 
 
 class ChatMessage(BaseModel):
@@ -28,6 +29,17 @@ class LLMRequest(BaseModel):
     top_p: float | None = Field(default=None, ge=0, le=1)
     max_tokens: int | None = Field(default=None, gt=0)
     stream: Literal[False] = False
+    response_format: ResponseFormat | None = Field(
+        default=None, exclude=True, description="Validated JSON object or JSON Schema output."
+    )
+    max_retries: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        strict=True,
+        exclude=True,
+        description="Gateway repair retries after structured output validation fails.",
+    )
 
 
 class AssistantMessage(BaseModel):
@@ -36,6 +48,7 @@ class AssistantMessage(BaseModel):
     role: Literal["assistant"]
     content: str | None = None
     reasoning_content: str | None = None
+    parsed: dict[str, JsonValue] | None = None
 
 
 class ChatCompletionUsage(BaseModel):
@@ -52,6 +65,12 @@ class ChatCompletionChoice(BaseModel):
     finish_reason: str | None = None
 
 
+class StructuredOutputInfo(BaseModel):
+    mode: Literal["json_object", "json_schema"]
+    attempts: int = Field(ge=1)
+    total_usage: ChatCompletionUsage | None = None
+
+
 class LLMResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -61,6 +80,7 @@ class LLMResponse(BaseModel):
     model: str
     choices: list[ChatCompletionChoice] = Field(min_length=1)
     usage: ChatCompletionUsage | None = None
+    structured_output: StructuredOutputInfo | None = None
 
 
 ChatCompletionRequest = LLMRequest

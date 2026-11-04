@@ -272,20 +272,18 @@ def test_excessive_output_tokens_are_rejected(chat_client: TestClient, upstream:
     upstream.assert_not_called()
 
 
-def test_capability_metadata_does_not_enable_response_format(
-    chat_client: TestClient, upstream: Mock
-) -> None:
+def test_unsupported_model_rejects_response_format(chat_client: TestClient, upstream: Mock) -> None:
     response = chat_client.post(
         "/v1/chat/completions",
         json={
-            "model": "general-chat",
+            "model": "coding-assistant",
             "messages": [{"role": "user", "content": "Hello"}],
             "response_format": {"type": "json_object"},
         },
     )
 
     assert response.status_code == 422
-    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["code"] == "MODEL_CAPABILITY_NOT_SUPPORTED"
     upstream.assert_not_called()
 
 

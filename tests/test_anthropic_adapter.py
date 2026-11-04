@@ -122,11 +122,13 @@ def test_messages_request_and_response_conversion(
                                 "role": "assistant",
                                 "content": "Hello!",
                                 "reasoning_content": "First thought.Second thought.",
+                                "parsed": None,
                             },
                             "finish_reason": "stop",
                         }
                     ],
                     "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+                    "structured_output": None,
                 }
             assert not client.is_closed
 

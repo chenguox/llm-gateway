@@ -15,11 +15,12 @@ logger = logging.getLogger(__name__)
 class GatewayError(Exception):
     """An expected gateway failure with a public, sanitized error message."""
 
-    def __init__(self, status_code: int, code: str, message: str) -> None:
+    def __init__(self, status_code: int, code: str, message: str, *, details: Any = None) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
+        self.details = details
 
 
 def error_response(
@@ -37,7 +38,7 @@ def error_response(
 
 
 async def gateway_exception_handler(request: Request, exc: GatewayError) -> JSONResponse:
-    return error_response(exc.status_code, exc.code, exc.message)
+    return error_response(exc.status_code, exc.code, exc.message, details=exc.details)
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:

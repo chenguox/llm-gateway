@@ -6,7 +6,7 @@
 健康检查只确认 HTTP 服务正在运行，不检查外部模型服务。
 通过统一的 `LLMRequest` / `LLMResponse` 协议和 `POST /v1/chat/completions` 接口，
 按逻辑模型名匹配内部配置、独立密钥和模型客户端。
-目前支持文本聊天和非流式响应，上游可使用 Chat Completions 或 Anthropic Messages 协议。
+目前支持文本聊天、非流式响应及经过 Pydantic 校验的结构化输出，上游可使用 Chat Completions 或 Anthropic Messages 协议。
 内置逻辑模型 `flash-chat` 使用 Messages 协议调用 DeepSeek V4 Flash。
 
 ## 环境要求
@@ -86,6 +86,8 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 | `top_p` | number / null | 否 | 范围 0～1；省略或为 null 时不传给上游 |
 | `max_tokens` | integer / null | 否 | 正整数；省略或为 null 时使用模型配置的输出上限；未配置上限时 Messages 默认 1024，Chat Completions 不传 |
 | `stream` | boolean | 否 | 默认 `false`，本次仅支持非流式响应，`true` 返回 HTTP 422 |
+| `response_format` | object / null | 否 | `json_object` 或 `json_schema`；只有通过网关校验的 JSON 对象才成功返回 |
+| `max_retries` | integer | 否 | 校验失败后的修复重试次数，默认 1，范围 0～3；不传给上游，普通文本请求不使用 |
 
 请求顶层不接受未定义字段，避免静默忽略不支持的功能。
 网关按逻辑模型名查找内部配置，使用对应密钥和客户端调用真实模型；不接受未配置的真实模型名。
@@ -124,6 +126,8 @@ Swagger 文档中的请求和响应类型分别为 `LLMRequest` 和 `LLMResponse
 | `choices[].message.role` | string | 固定为 `assistant` |
 | `choices[].message.content` | string / null | 生成的文本，可省略 |
 | `choices[].message.reasoning_content` | string / null | 可选的推理内容 |
+| `choices[].message.parsed` | object / null | 结构化请求通过 Pydantic 校验后的 JSON 对象 |
+| `structured_output` | object / null | 实际输出模式、总调用次数及所有尝试的累计用量 |
 | `choices[].finish_reason` | string / null | 可选的结束原因，例如 `stop`、`length` |
 | `usage` | object / null | 可选的 token 用量 |
 | `usage.prompt_tokens` | integer | 非负输入 token 数 |
@@ -191,6 +195,9 @@ Invoke-RestMethod -Method Post `
 | 502 | `UPSTREAM_HTTP_ERROR` | 上游返回其他非成功状态，包括上游认证失败 |
 | 502 | `UPSTREAM_CONNECTION_ERROR` | 上游网络或传输协议错误 |
 | 502 | `UPSTREAM_INVALID_RESPONSE` | 上游返回无效 JSON 或不符合响应协议的数据 |
+| 422 | `STRUCTURED_OUTPUT_SCHEMA_INVALID` | Schema 无效、超出支持范围或复杂度限制 |
+| 502 | `STRUCTURED_OUTPUT_VALIDATION_FAILED` | 结构化内容校验失败，并已用尽修复次数 |
+| 502 | `STRUCTURED_OUTPUT_REFUSED` | 模型明确拒答，不进行修复重试 |
 
 例如，上游超时返回：
 
@@ -218,7 +225,10 @@ Invoke-RestMethod http://127.0.0.1:8000/v1/models | ConvertTo-Json -Depth 10
 
 模型能力包含聊天、流式、工具调用、视觉、推理、结构化输出及可选的上下文窗口和输出限制。
 结构化输出通过 `structured_output.supported` 和 `structured_output.modes` 声明，模式支持 `json_object`、`json_schema`。
-本轮只维护和展示结构化输出能力，尚未开放 `response_format` 请求参数。
+结构化请求通过 `response_format` 指定 JSON 对象或目标 Schema，网关根据能力选择模式并严格校验。
+默认 `general-chat`、`coding-assistant` 已声明 `json_object`；请求 Schema 时可回退到该模式，仍按原始 Schema 校验。
+原生 `json_schema` 优先使用；模型和协议均不支持时返回 422。
+请求示例、Schema 支持范围及修复重试说明见 [结构化输出说明](app/structured_output/README.md)。
 模型能力声明不会自动开启网关尚未实现的流式、工具调用或多模态接口。
 
 配置加载时校验名称重复、密钥变量重复、适配器类型、地址和结构化输出模式等内容。
@@ -286,7 +296,8 @@ Messages 不提供创建时间，因此 `created` 为网关处理响应时的 Un
 适配器的健康检查使用模型列表接口；兼容服务未实现该接口时返回 false，不影响正常聊天或服务 `/health`。
 
 传给适配器的请求使用真实模型名；返回客户端前，由模型注册表改回逻辑模型名。
-非成功状态、超时、网络错误及响应校验异常统一转换为网关错误；当前不自动重试。
+非成功状态、超时、网络错误及响应信封校验异常统一转换为网关错误，不触发结构化修复重试。
+网关创建的 HTTP 客户端显式使用 `retries=0`；只有结构化内容校验失败时，服务层才按 `max_retries` 发起修复调用。
 
 对外路由通过依赖注入获得 `ModelRegistry`，由它按逻辑模型名选择适配器。
 应用启动时为密钥已配置的模型创建客户端，同一进程内复用，关闭时统一释放。
@@ -326,6 +337,7 @@ DeepSeek 单元测试使用 `httpx2.MockTransport` 模拟上游，验证请求�
 ```powershell
 uv run pytest tests/test_deepseek_adapter.py
 uv run pytest tests/test_anthropic_adapter.py
+uv run pytest tests/test_structured_output.py
 ```
 
 聊天接口测试还覆盖统一协议、参数校验、上游错误映射、连接生命周期和依赖替换：

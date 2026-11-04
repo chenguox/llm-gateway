@@ -12,7 +12,7 @@
 示例配置包含 `general-chat`、`coding-assistant` 和 `flash-chat`。
 前两个逻辑模型使用 Chat Completions 协议；`flash-chat` 使用 Messages 协议调用 DeepSeek V4 Flash。
 三个入口使用不同的密钥变量；可以独立修改实际模型和服务地址。
-示例能力采用保守配置，仅声明当前示例使用的文本非流式能力，不代表供应商的全部能力。
+示例能力采用保守配置：文本非流式能力，以及前两个入口的 JSON Object 输出，不代表供应商的全部能力。
 
 ## 模型字段
 
@@ -114,8 +114,14 @@ Anthropic 官方服务可配置 `https://api.anthropic.com`，真实模型名填
 - 不支持结构化输出时，必须配置 `supported=false`、`modes=[]`。
 - 支持时至少指定一种模式；不允许未定义模式或重复模式。
 
-本轮只记录和展示结构化输出能力，聊天请求尚不接受 `response_format` 或 JSON Schema。
-同样，模型能力声明不会自动启用网关当前尚未实现的流式、工具调用或多模态接口。
+聊天请求已支持 `response_format`。请求 `json_schema` 时优先使用原生 Schema；模型仅支持 `json_object` 时，
+将原始 Schema 加入 JSON 提示词，并保持本地 Pydantic 校验，不降低返回结果的字段约束。
+Chat Completions 适配器实现两种格式；Messages 实现 `output_config.format` 的 `json_schema`，没有通用 `json_object` 模式。
+实际可用模式取配置与协议实现的交集，不能仅修改能力标记来启用厂商不支持的功能。
+默认 `general-chat`、`coding-assistant` 配置为 `supported=true`、`modes=["json_object"]`。
+DeepSeek Messages 入口 `flash-chat` 不支持这一原生格式约束，仍保持 `supported=false`。
+完整说明见 [结构化输出](../app/structured_output/README.md)。
+模型能力声明不会自动启用网关当前尚未实现的流式、工具调用或多模态接口。
 
 如果配置了 `max_output_tokens`，请求超过上限会直接返回错误，不会静默截断。
 请求未指定 `max_tokens` 或值为 null 时，使用配置上限作为发往上游的 `max_tokens`。
@@ -172,6 +178,9 @@ FLASH_CHAT_API_KEY=Flash模型的独立密钥
 | 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 模型配置不支持聊天 |
 | 422 | `MODEL_TOKEN_LIMIT_EXCEEDED` | 请求输出 token 数超过配置上限 |
 | 422 | `INVALID_MESSAGES` | Messages 请求缺少用户或助手消息 |
+| 422 | `STRUCTURED_OUTPUT_SCHEMA_INVALID` | Schema 不合法或含有未实现的约束 |
+| 502 | `STRUCTURED_OUTPUT_VALIDATION_FAILED` | 结构化校验失败且重试耗尽 |
+| 502 | `STRUCTURED_OUTPUT_REFUSED` | 模型拒答，不进行结构化修复 |
 
 无效 JSON、逻辑名重复、密钥变量重复、不支持的适配器、无效地址及矛盾的能力配置在应用创建时报告错误。
 上游限流、认证失败、超时、网络错误等沿用聊天接口已有的统一错误处理。

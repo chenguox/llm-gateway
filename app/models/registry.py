@@ -8,6 +8,8 @@ from app.adapters.base import ModelAdapter
 from app.adapters.factory import create_adapter
 from app.core.config import Settings
 from app.core.errors import GatewayError
+from app.governance.context import current_call
+from app.governance.invocation import invoke
 from app.schemas.chat import LLMRequest, LLMResponse
 from app.schemas.models import LogicalModelInfo, ModelConfiguration, ModelsConfiguration
 from app.streaming.provider import CompletionStream
@@ -83,6 +85,9 @@ class ModelRegistry:
     async def complete(self, request: LLMRequest) -> LLMResponse | CompletionStream:
         """校验模型能力并统一调用客户端；完整响应恢复逻辑模型名。"""
         configuration = self.get_configuration(request.model)
+        call = current_call.get()
+        if call is not None:
+            call.route(configuration)
         # 在发起上游请求前检查能力，避免向不支持聊天的模型发送请求。
         if not configuration.capabilities.chat:
             raise GatewayError(422, "MODEL_CAPABILITY_NOT_SUPPORTED", "Model does not support chat")
@@ -95,6 +100,12 @@ class ModelRegistry:
                 422,
                 "STREAMING_STRUCTURED_OUTPUT_NOT_SUPPORTED",
                 "Streaming cannot be combined with response_format",
+            )
+        if configuration.provider == "anthropic" and all(
+            message.role == "system" for message in request.messages
+        ):
+            raise GatewayError(
+                422, "INVALID_MESSAGES", "Messages requests require a user or assistant message"
             )
         limit = configuration.capabilities.max_output_tokens
         # 显式请求超过配置上限时直接报错，不静默缩减调用方指定的值。
@@ -111,7 +122,7 @@ class ModelRegistry:
         )
         adapter = self.get_adapter(request.model)
         if request.response_format is None:
-            response = await adapter.complete(upstream_request)
+            response = await invoke(adapter, upstream_request)
         else:
             response = await complete_structured(adapter, configuration, upstream_request)
         if isinstance(response, CompletionStream):

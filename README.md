@@ -56,6 +56,11 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 | `ENVIRONMENT` | `development` | 环境标识，可选 `development`、`test`、`production` |
 | `LOG_LEVEL` | `INFO` | 应用日志级别，可选 `DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL` |
 | `MODELS_CONFIG_PATH` | 项目下的 `config/models.json` | 模型配置文件路径，默认路径不依赖工作目录 |
+| `CALL_RECORDS_PATH` | 项目下的 `data/calls.sqlite3` | SQLite 调用主记录与上游尝试明细；自定义相对路径按工作目录解析 |
+| `CALL_RECORDS_RETENTION_DAYS` | 30 | 已结束调用的保留天数，启动时及每小时清理，未结束记录保留待核对 |
+| `PRICES_CONFIG_PATH` | 项目下的 `config/prices.json` | 模型价格版本配置；示例为空，不假设真实价格 |
+| `AUDIT_HMAC_KEY` | 空 | 可选的独立 HMAC 密钥，至少 32 字节；空值时不保存内容指纹 |
+| `AUDIT_HMAC_KEY_ID` | v1 | 指纹密钥版本，仅保存此标识，不保存密钥 |
 | `GENERAL_CHAT_API_KEY` | 空 | 示例逻辑模型 `general-chat` 的独立密钥 |
 | `CODING_ASSISTANT_API_KEY` | 空 | 示例逻辑模型 `coding-assistant` 的独立密钥 |
 | `FLASH_CHAT_API_KEY` | 空 | 示例逻辑模型 `flash-chat` 的独立密钥，使用 DeepSeek Messages 接口 |
@@ -128,7 +133,7 @@ $body | curl.exe -N http://127.0.0.1:8000/v1/chat/completions -H "Content-Type: 
 | --- | --- | --- |
 | `started` | 流已建立，只发送一次 | 无 |
 | `delta` | 文本、推理内容或角色增量 | `delta.index`、`delta.content`、`delta.reasoning_content`、`delta.role` |
-| `usage` | 用量快照，供应商提供时发送，可多次更新 | `usage.prompt_tokens`、`usage.completion_tokens`、`usage.total_tokens` |
+| `usage` | 用量快照，供应商提供时发送，可多次更新 | `usage.input_tokens`、`usage.output_tokens`、`usage.total_tokens` |
 | `completed` | 供应商明确结束响应 | `finish_reasons` 数组及最终 `usage`（如有） |
 | `failed` | 流执行失败 | `error.code`、`error.message` 及已知用量（如有） |
 | `cancelled` | 请求被取消 | `reason` 及已知用量（如有） |
@@ -168,7 +173,7 @@ SSE 建立后，超时、网络错误、无效数据及供应商错误事件转�
 客户端断开或服务端取消请求时，停止上游读取并释放连接，内部确定并记录唯一终态。
 连接已断开或请求任务已取消时无法保证发送 `cancelled`；内部终态通过 `app.streaming.service` 的 INFO 日志记录。
 终态日志使用网关流 ID 和逻辑模型名，不包含原始供应商错误内容。
-此日志不是持久化任务状态查询接口。
+完整调用记录会写入 SQLite，可通过 `X-Request-ID` 查询，见 [用量与调用治理](app/governance/README.md)。
 
 ### LLM Response
 
@@ -186,15 +191,19 @@ SSE 建立后，超时、网络错误、无效数据及供应商错误事件转�
 | `choices[].message.content` | string / null | 生成的文本，可省略 |
 | `choices[].message.reasoning_content` | string / null | 可选的推理内容 |
 | `choices[].message.parsed` | object / null | 结构化请求通过 Pydantic 校验后的 JSON 对象 |
-| `structured_output` | object / null | 实际输出模式、总调用次数及所有尝试的累计用量 |
+| `structured_output` | object / null | 实际输出模式及总调用次数；累计用量统一放在顶层 `usage` |
 | `choices[].finish_reason` | string / null | 可选的结束原因，例如 `stop`、`length` |
-| `usage` | object / null | 可选的 token 用量 |
-| `usage.prompt_tokens` | integer | 非负输入 token 数 |
-| `usage.completion_tokens` | integer | 非负输出 token 数 |
-| `usage.total_tokens` | integer | 非负总 token 数 |
+| `usage` | object / null | 本次请求全部上游尝试的累计用量，包含结构化输出修复调用 |
+| `usage.input_tokens` | integer / null | 非负输入 token 数，缺少数据时为 null |
+| `usage.output_tokens` | integer / null | 非负输出 token 数，缺少数据时为 null |
+| `usage.total_tokens` | integer / null | 前两项之和；任一未知时为 null |
 
-响应会保留上游在响应顶层、助手消息和用量对象中返回的扩展字段。
-上游未返回的可选字段不会额外补充到接口响应中。
+响应会保留上游在响应顶层和助手消息中返回的扩展字段。
+用量只输出统一字段，供应商扩展用量不会直接透传；缓存输入和推理输出的分类明细仅保存在内部记录。
+没有供应商用量时 `usage` 可省略或为 null；未知计数不填 0，不根据字符数估算 Token。
+流式快照不能相加；缺少最终用量时保留已知下限，并将最终未知计数置为 null。
+旧 `prompt_tokens`、`completion_tokens` 字段已替换为 `input_tokens`、`output_tokens`，
+旧 `structured_output.total_usage` 已合并到顶层 `usage`，客户端需要同步更新。
 
 响应示例：
 
@@ -211,7 +220,7 @@ SSE 建立后，超时、网络错误、无效数据及供应商错误事件转�
       "finish_reason": "stop"
     }
   ],
-  "usage": {"prompt_tokens": 20, "completion_tokens": 12, "total_tokens": 32}
+  "usage": {"input_tokens": 20, "output_tokens": 12, "total_tokens": 32}
 }
 ```
 
@@ -246,6 +255,7 @@ Invoke-RestMethod -Method Post `
 | 422 | `PROMPT_PARAMETER_ERROR` | 模板参数缺失或提供了未定义参数 |
 | 404 | `MODEL_NOT_FOUND` | 逻辑模型不存在，不会回退到其他模型 |
 | 503 | `MODEL_NOT_CONFIGURED` | 当前模型指定的密钥变量缺失或为空白 |
+| 503 | `CALL_RECORD_UNAVAILABLE` | 调用开始或上游尝试开始前无法写入记录，拒绝发起上游请求 |
 | 422 | `MODEL_CAPABILITY_NOT_SUPPORTED` | 配置中的模型不支持聊天、流式或指定的结构化输出模式 |
 | 422 | `STREAMING_STRUCTURED_OUTPUT_NOT_SUPPORTED` | 流式请求同时指定了 `response_format` |
 | 422 | `MODEL_TOKEN_LIMIT_EXCEEDED` | 请求的输出 token 数超过该模型配置的上限 |
@@ -269,6 +279,25 @@ Invoke-RestMethod -Method Post `
   }
 }
 ```
+
+## 用量与调用治理
+
+所有聊天请求均生成网关关联 ID，并在响应头 `X-Request-ID` 中返回。
+一次请求对应一条 `calls` 主记录；每次上游调用对应一条 `attempts` 明细，结构化修复不会漏记。
+记录覆盖关联、路由、Prompt 元数据、用量、延迟、弹性、结果、错误和成本，默认写入 `data/calls.sqlite3`。
+流式请求直到终态和连接清理后才完成主记录，HTTP 200 不等于最终生成成功。
+
+默认不保存消息、Prompt 正文、模型答案、推理正文、模板参数值、认证信息或原始错误。
+应用默认将 HTTP 客户端和 Uvicorn 访问日志降到 WARNING，避免详细请求目标进入控制台日志。
+独立 HMAC 指纹、价格配置、成本完整性和本地查询命令见 [用量与调用治理说明](app/governance/README.md)。
+
+```powershell
+uv run python -m app.governance --request-id YOUR_REQUEST_ID
+uv run python -m app.governance --model general-chat --limit 20
+```
+
+成本使用 Decimal 和本次调用采用的价格快照计算。默认价格配置为空，成本标记为 `unpriced`，金额为 null。
+没有发起上游调用时成本为 0；未知用量或未知价格不能当作零成本。
 
 ## 模型配置管理
 

@@ -4,12 +4,15 @@ from types import TracebackType
 from typing import Self
 
 import httpx2 as httpx
+from pydantic import TypeAdapter
 
+from app.governance.context import capture_headers, capture_usage
 from app.schemas.chat import LLMRequest, LLMResponse
 from app.schemas.structured_output import JsonSchemaFormat
 from app.streaming.compatible import normalize_completions
 from app.streaming.provider import CompletionStream, open_completion_stream
 from app.structured_output.formats import native_schema
+from app.usage import compatible_usage
 
 
 class ChatCompletionsAdapter:
@@ -74,8 +77,13 @@ class ChatCompletionsAdapter:
             timeout=self._timeout,
         )
         # 将 HTTP 错误和响应校验异常向上传递，由 API 层统一转换为网关错误。
+        capture_headers(response.headers, response.status_code)
         response.raise_for_status()
-        return LLMResponse.model_validate(response.json())
+        data = TypeAdapter(dict[str, object]).validate_python(response.json())
+        if "usage" in data:
+            data["usage"] = compatible_usage(data["usage"])
+            capture_usage(data["usage"])
+        return LLMResponse.model_validate(data)
 
     async def healthcheck(self) -> bool:
         """访问需要认证的模型列表接口，检查连通性而不发起文本生成。"""

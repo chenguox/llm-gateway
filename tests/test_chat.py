@@ -39,7 +39,11 @@ def test_chat_forwards_request_and_returns_unified_response(
     response = chat_client.post("/v1/chat/completions", json=payload)
 
     assert response.status_code == 200
-    assert response.json() == {**completion, "model": "general-chat"}
+    assert response.json() == {
+        **completion,
+        "model": "general-chat",
+        "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+    }
     upstream.assert_called_once()
     request = upstream.call_args.args[0]
     assert request.method == "POST"
@@ -241,7 +245,12 @@ def test_model_registry_dependency_can_be_overridden(
     application: FastAPI, client: TestClient, completion: dict
 ) -> None:
     registry = AsyncMock(spec=ModelRegistry)
-    registry.complete.return_value = LLMResponse.model_validate(completion)
+    registry.complete.return_value = LLMResponse.model_validate(
+        {
+            **completion,
+            "usage": {"input_tokens": 12, "output_tokens": 8},
+        }
+    )
     application.dependency_overrides[get_model_registry] = lambda: registry
 
     response = client.post(
@@ -296,7 +305,11 @@ def test_selected_prompt_replaces_system_messages_before_calling_provider(
     )
 
     assert response.status_code == 200
-    assert response.json() == {**completion, "model": "general-chat"}
+    assert response.json() == {
+        **completion,
+        "model": "general-chat",
+        "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+    }
     upstream.assert_called_once()
     payload = json.loads(upstream.call_args.args[0].content)
     assert payload == {

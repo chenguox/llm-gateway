@@ -7,6 +7,7 @@ from typing import Self
 import httpx2 as httpx
 
 from app.core.errors import GatewayError
+from app.governance.context import capture_headers, capture_usage
 from app.schemas.anthropic import (
     AnthropicMessageResponse,
     AnthropicTextBlock,
@@ -15,7 +16,6 @@ from app.schemas.anthropic import (
 from app.schemas.chat import (
     AssistantMessage,
     ChatCompletionChoice,
-    ChatCompletionUsage,
     LLMRequest,
     LLMResponse,
 )
@@ -23,6 +23,7 @@ from app.schemas.structured_output import JsonSchemaFormat
 from app.streaming.anthropic import finish_reason, normalize_messages
 from app.streaming.provider import CompletionStream, open_completion_stream
 from app.structured_output.formats import native_schema
+from app.usage import anthropic_usage
 
 
 class AnthropicMessagesAdapter:
@@ -121,12 +122,15 @@ class AnthropicMessagesAdapter:
             timeout=self._timeout,
         )
         # HTTP、JSON 解析和结构校验异常交由 API 层映射，避免透传上游内部错误详情。
+        capture_headers(response.headers, response.status_code)
         response.raise_for_status()
         return self._normalize(AnthropicMessageResponse.model_validate(response.json()))
 
     def _normalize(self, response: AnthropicMessageResponse) -> LLMResponse:
         """合并文本和推理块，计算包含缓存的用量，并映射结束原因。"""
         # 按内容块出现的顺序拼接文本，统一返回一条助手消息。
+        usage = anthropic_usage(response.usage)
+        capture_usage(usage)
         message = AssistantMessage(
             role="assistant",
             content="".join(
@@ -142,11 +146,6 @@ class AnthropicMessagesAdapter:
         if thinking:
             message.reasoning_content = "".join(thinking)
         # 上游将普通输入、缓存创建和缓存读取分开计数，统一协议需要合计输入 token。
-        prompt_tokens = (
-            response.usage.input_tokens
-            + response.usage.cache_creation_input_tokens
-            + response.usage.cache_read_input_tokens
-        )
         # 将常见结束原因映射到统一协议；其余原因（包括 None）原样保留。
         reason = finish_reason(response.stop_reason) if response.stop_reason is not None else None
         return LLMResponse(
@@ -157,11 +156,7 @@ class AnthropicMessagesAdapter:
             # 此处保留上游模型名，模型注册表会在返回调用方前改回逻辑模型名。
             model=response.model,
             choices=[ChatCompletionChoice(index=0, message=message, finish_reason=reason)],
-            usage=ChatCompletionUsage(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=response.usage.output_tokens,
-                total_tokens=prompt_tokens + response.usage.output_tokens,
-            ),
+            usage=usage,
         )
 
     async def healthcheck(self) -> bool:

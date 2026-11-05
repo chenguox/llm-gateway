@@ -1,13 +1,19 @@
 """Own an upstream HTTP response and decode SSE records incrementally."""
 
+import asyncio
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import anyio
 import httpx2 as httpx
 
 from app.core.errors import GatewayError
+from app.governance.context import capture_headers
 from app.schemas.streaming import StreamUpdate
+
+if TYPE_CHECKING:
+    from app.governance.context import AttemptContext
 
 
 def invalid_stream() -> GatewayError:
@@ -59,9 +65,36 @@ class CompletionStream:
         self.response = response
         self._updates = updates
         self._closed = False
+        self.observer: AttemptContext | None = None
+        self._observed_iterator: AsyncGenerator[StreamUpdate] | None = None
 
     def __aiter__(self) -> AsyncGenerator[StreamUpdate]:
-        return self._updates
+        if self.observer is None:
+            return self._updates
+        if self._observed_iterator is None:
+            self._observed_iterator = self._observe()
+        return self._observed_iterator
+
+    async def _observe(self) -> AsyncGenerator[StreamUpdate]:
+        observer = self.observer
+        try:
+            async for update in self._updates:
+                observer.observe(update.usage)
+                if update.delta and (update.delta.content or update.delta.reasoning_content):
+                    observer.first_content()
+                if update.type == "completed":
+                    await observer.finish(
+                        "completed",
+                        reasons=[reason.finish_reason for reason in update.finish_reasons or []],
+                    )
+                yield update
+        except (asyncio.CancelledError, GeneratorExit):
+            with anyio.CancelScope(shield=True):
+                await observer.finish("cancelled")
+            raise
+        except Exception as exc:
+            await observer.finish("failed", exc=exc)
+            raise
 
     async def aclose(self) -> None:
         if self._closed:
@@ -69,9 +102,17 @@ class CompletionStream:
         self._closed = True
         with anyio.CancelScope(shield=True):
             try:
-                await self._updates.aclose()
+                if self._observed_iterator is not None:
+                    await self._observed_iterator.aclose()
             finally:
-                await self.response.aclose()
+                try:
+                    await self._updates.aclose()
+                finally:
+                    try:
+                        if self.observer is not None:
+                            await self.observer.finish("cancelled")
+                    finally:
+                        await self.response.aclose()
 
 
 async def open_completion_stream(
@@ -92,6 +133,7 @@ async def open_completion_stream(
     )
     response = await client.send(request, stream=True)
     try:
+        capture_headers(response.headers, response.status_code)
         response.raise_for_status()
         content_type = response.headers.get("content-type", "").split(";", 1)[0].strip()
         if content_type != "text/event-stream":

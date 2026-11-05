@@ -117,13 +117,15 @@ Chat Completions 上游使用 `response_format`；原生 Claude Messages 使用
 }
 ```
 
-所有 choice 都必须通过校验。顶层 `structured_output` 返回实际 `mode`、总调用次数 `attempts`、
-所有尝试累计的 `total_usage`。原有顶层 `usage` 仍表示最后一次调用的用量。
-任意一次缺少上游用量时，`total_usage` 为 null，避免把不完整合计当作总消耗。
+所有 choice 都必须通过校验。顶层 `structured_output` 返回实际 `mode`、总调用次数 `attempts`。
+顶层 `usage` 统一返回所有尝试累计的 `input_tokens`、`output_tokens` 和派生的 `total_tokens`，包含修复调用。
+不再返回 `structured_output.total_usage`。任一尝试缺少某项用量时，对应累计字段为 null；
+完整性与已知消耗下限保存在内部调用记录中，避免把不完整合计当作总消耗。
 普通文本请求不会主动增加 `parsed` 或 `structured_output` 字段。
 
 修复次数耗尽时返回 502 `STRUCTURED_OUTPUT_VALIDATION_FAILED`。`error.details` 包含尝试次数、
-字段位置、错误类型和累计用量，不包含失败输出正文或 Pydantic 的 input/context。
+字段位置、错误类型和累计 `usage`，不包含失败输出正文或 Pydantic 的 input/context。
+每次修复均有独立尝试明细，见 [用量与调用治理](../governance/README.md)。
 
 ## 测试
 

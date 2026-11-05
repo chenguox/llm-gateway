@@ -8,9 +8,9 @@ import httpx2 as httpx
 from pydantic import BaseModel, Field
 
 from app.core.errors import GatewayError
-from app.schemas.chat import ChatCompletionUsage
 from app.schemas.streaming import StreamDelta, StreamFinishReason, StreamUpdate
 from app.streaming.provider import invalid_stream, read_sse
+from app.usage import compatible_usage
 
 
 class _Delta(BaseModel):
@@ -34,17 +34,20 @@ class _Frame(BaseModel):
     created: int
     model: str
     choices: list[_Choice]
-    usage: ChatCompletionUsage | None = None
+    usage: dict | None = None
 
 
 async def normalize_completions(response: httpx.Response) -> AsyncGenerator[StreamUpdate]:
     seen: set[int] = set()
     finished: dict[int, str] = {}
     usage = None
+    final_usage = False
     async for record in read_sse(response):
         if record.data == "[DONE]":
             if not seen or seen != finished.keys():
                 raise invalid_stream()
+            if usage is not None and not final_usage:
+                usage = usage.model_copy(update={"output_tokens": None})
             yield StreamUpdate(
                 type="completed",
                 usage=usage,
@@ -84,6 +87,7 @@ async def normalize_completions(response: httpx.Response) -> AsyncGenerator[Stre
             if choice.finish_reason is not None:
                 finished[choice.index] = choice.finish_reason
         if frame.usage is not None:
-            usage = frame.usage
+            usage = compatible_usage(frame.usage)
+            final_usage = bool(seen) and seen == finished.keys()
             yield StreamUpdate(type="usage", usage=usage)
     raise invalid_stream()

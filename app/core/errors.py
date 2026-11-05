@@ -59,10 +59,20 @@ def error_response(
 
 
 async def gateway_exception_handler(request: Request, exc: GatewayError) -> JSONResponse:
+    from app.governance.context import current_call
+
+    call = current_call.get()
+    if call is not None:
+        call.error(exc.code)
     return error_response(exc.status_code, exc.code, exc.message, details=exc.details)
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    from app.governance.context import current_call
+
+    call = current_call.get()
+    if call is not None:
+        call.error("HTTP_ERROR")
     return error_response(
         exc.status_code,
         "HTTP_ERROR",
@@ -75,6 +85,11 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
+    from app.governance.context import current_call
+
+    call = current_call.get()
+    if call is not None:
+        call.error("VALIDATION_ERROR", stage="validation")
     # Exclude submitted values and validation context, which may contain secrets.
     details = [
         {"location": error["loc"], "message": error["msg"], "type": error["type"]}
@@ -85,10 +100,9 @@ async def validation_exception_handler(
 
 async def unexpected_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.error(
-        "Unhandled exception for %s %s",
+        "Unhandled exception method=%s category=%s",
         request.method,
-        request.url.path,
-        exc_info=(type(exc), exc, exc.__traceback__),
+        type(exc).__name__,
     )
     return error_response(500, "INTERNAL_ERROR", "Internal server error")
 

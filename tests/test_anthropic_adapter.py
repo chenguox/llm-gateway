@@ -127,7 +127,7 @@ def test_messages_request_and_response_conversion(
                             "finish_reason": "stop",
                         }
                     ],
-                    "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+                    "usage": {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28},
                     "structured_output": None,
                 }
             assert not client.is_closed

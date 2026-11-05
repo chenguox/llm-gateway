@@ -6,6 +6,8 @@ from pydantic import ValidationError
 
 from app.adapters.base import ModelAdapter
 from app.core.errors import GatewayError
+from app.governance.context import current_call
+from app.governance.invocation import invoke
 from app.schemas.chat import (
     ChatCompletionUsage,
     ChatMessage,
@@ -17,6 +19,7 @@ from app.schemas.models import ModelConfiguration
 from app.schemas.structured_output import JsonObjectFormat, JsonSchemaFormat
 from app.structured_output.formats import format_messages
 from app.structured_output.schema import SchemaCompiler, object_validator, strict_json_object
+from app.usage import aggregate_usage
 
 PROTOCOL_MODES = {
     "deepseek": {"json_object", "json_schema"},
@@ -29,6 +32,9 @@ async def complete_structured(
     adapter: ModelAdapter, configuration: ModelConfiguration, request: LLMRequest
 ) -> LLMResponse:
     """模式选择和校验只在网关执行；HTTP、认证、信封校验等错误不进入修复循环。"""
+    call = current_call.get()
+    if call is not None:
+        call.stage = "structured_schema"
     requested = request.response_format
     schema_format = requested if isinstance(requested, JsonSchemaFormat) else None
     validator = (
@@ -58,31 +64,30 @@ async def complete_structured(
             "messages": baseline,
         }
     )
-    totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    usage_complete = True
+    usages: list[ChatCompletionUsage | None] = []
     for attempt in range(1, request.max_retries + 2):
-        response = await adapter.complete(upstream_request)
+        response = await invoke(adapter, upstream_request, repair=attempt > 1)
+        if call is not None:
+            call.stage = "structured_validation"
         if not isinstance(response, LLMResponse):
             await response.aclose()
             raise TypeError("Structured output requires a non-streaming completion")
-        if response.usage is None:
-            usage_complete = False
-        else:
-            for name in totals:
-                totals[name] += getattr(response.usage, name)
-        total_usage = ChatCompletionUsage(**totals) if usage_complete else None
+        usages.append(response.usage)
+        total_usage = aggregate_usage(usages)
         if any(
             choice.finish_reason in {"content_filter", "refusal"}
             or choice.message.model_extra.get("refusal")
             for choice in response.choices
         ):
+            if call is not None:
+                await call.assess("refused", "STRUCTURED_OUTPUT_REFUSED")
             raise GatewayError(
                 502,
                 "STRUCTURED_OUTPUT_REFUSED",
                 "Model declined structured output",
                 details={
                     "attempts": attempt,
-                    "total_usage": total_usage.model_dump() if total_usage else None,
+                    "usage": total_usage.model_dump() if total_usage else None,
                 },
             )
         errors = []
@@ -121,14 +126,17 @@ async def complete_structured(
             errors.append({"choice_index": choice.index, "errors": problems})
             failed_outputs.append({"choice_index": choice.index, "content": choice.message.content})
         if not errors:
+            if call is not None:
+                await call.assess("passed")
             return response.model_copy(
                 update={
                     "choices": choices,
-                    "structured_output": StructuredOutputInfo(
-                        mode=mode, attempts=attempt, total_usage=total_usage
-                    ),
+                    "usage": total_usage,
+                    "structured_output": StructuredOutputInfo(mode=mode, attempts=attempt),
                 }
             )
+        if call is not None:
+            await call.assess("failed", "STRUCTURED_OUTPUT_VALIDATION_FAILED")
         if attempt > request.max_retries:
             raise GatewayError(
                 502,
@@ -137,7 +145,7 @@ async def complete_structured(
                 details={
                     "attempts": attempt,
                     "errors": errors,
-                    "total_usage": total_usage.model_dump() if total_usage else None,
+                    "usage": total_usage.model_dump() if total_usage else None,
                 },
             )
         candidate = (

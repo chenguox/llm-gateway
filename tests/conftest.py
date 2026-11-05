@@ -14,6 +14,12 @@ from app.core.config import Settings
 from app.main import create_app
 
 
+@pytest.fixture(autouse=True)
+def isolated_call_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CALL_RECORDS_PATH", str(tmp_path / "calls.sqlite3"))
+    monkeypatch.delenv("AUDIT_HMAC_KEY", raising=False)
+
+
 @pytest.fixture
 def model_configuration() -> dict:
     return {

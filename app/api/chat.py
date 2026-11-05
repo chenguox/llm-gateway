@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.dependencies import get_model_registry, get_prompt_registry
 from app.core.errors import map_upstream_error
+from app.governance.context import current_call
 from app.models.registry import ModelRegistry
 from app.prompts.registry import PromptRegistry
 from app.schemas.chat import LLMRequest, LLMResponse
@@ -26,7 +27,15 @@ async def chat_completions(
     models: Annotated[ModelRegistry, Depends(get_model_registry)],
     prompts: Annotated[PromptRegistry, Depends(get_prompt_registry)],
 ) -> LLMResponse | GatewayStreamingResponse:
+    call = current_call.get()
+    if call is not None:
+        call.stage = "prompt"
+        call.record.result.stream = request.stream
+    original = request
     request = prompts.build_request(request)
+    if call is not None:
+        call.capture_prompt(original, request)
+        call.stage = "routing"
     try:
         response = await models.complete(request)
         if isinstance(response, CompletionStream):

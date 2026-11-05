@@ -144,7 +144,7 @@ def test_stream_normalizes_deltas_usage_and_late_terminal(
     ]
     assert result[1]["delta"] == {"index": 0, "role": "assistant", "reasoning_content": "Think"}
     assert result[2]["delta"]["content"] == "你好\nworld"
-    assert result[-1]["usage"] == usage
+    assert result[-1]["usage"] == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
     assert result[-1]["finish_reasons"] == [{"index": 0, "finish_reason": "stop"}]
     assert all(event["model"] == model for event in result)
     assert "provider-private" not in response.text
@@ -433,7 +433,7 @@ def test_messages_normalize_reasoning_cached_usage_and_finish(
         {"index": 0, "content": "你好"},
         {"index": 0, "content": "\nworld"},
     ]
-    assert result[-1]["usage"] == {"prompt_tokens": 15, "completion_tokens": 8, "total_tokens": 23}
+    assert result[-1]["usage"] == {"input_tokens": 15, "output_tokens": 8, "total_tokens": 23}
     assert result[-1]["finish_reasons"] == [{"index": 0, "finish_reason": "stop"}]
     assert "private-secret" not in response.text
     assert "provider-private" not in response.text
@@ -642,6 +642,33 @@ def test_completed_wins_over_late_cancellation() -> None:
         await client.aclose()
 
     asyncio.run(run())
+
+
+def test_messages_missing_final_usage_does_not_reuse_initial_output_count(
+    messages_client: TestClient,
+    upstream: Mock,
+) -> None:
+    updates = message_events()
+    updates[-2].pop("usage")
+    upstream.return_value, body = response_stream(
+        b"".join(sse(event, event["type"]) for event in updates)
+    )
+
+    response = messages_client.post("/v1/chat/completions", json=stream_request())
+
+    result = events(response)
+    assert result[-1]["type"] == "completed"
+    assert result[-1]["usage"] == {"input_tokens": 15, "output_tokens": None, "total_tokens": None}
+
+    async def read() -> None:
+        store = messages_client.app.state.record_store
+        call = (await store.find_calls(request_id=response.headers["x-request-id"]))[0]
+        assert call["usage"]["status"] == "partial"
+        assert call["usage"]["output_tokens"] is None
+        assert call["usage"]["known_output_tokens"] == 1
+
+    asyncio.run(read())
+    assert body.closed
 
 
 def test_failure_wins_over_late_cancellation() -> None:

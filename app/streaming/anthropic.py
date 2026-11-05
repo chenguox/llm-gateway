@@ -8,10 +8,11 @@ import httpx2 as httpx
 from pydantic import BaseModel, Field, TypeAdapter
 
 from app.core.errors import GatewayError
-from app.schemas.anthropic import AnthropicMessageResponse, ContentBlock
+from app.schemas.anthropic import AnthropicMessageResponse, AnthropicUsage, ContentBlock
 from app.schemas.chat import ChatCompletionUsage
 from app.schemas.streaming import StreamDelta, StreamFinishReason, StreamUpdate
 from app.streaming.provider import invalid_stream, read_sse
+from app.usage import anthropic_usage
 
 
 def finish_reason(reason: str) -> str:
@@ -77,15 +78,7 @@ _object = TypeAdapter(dict[str, object])
 
 
 def _usage(values: dict[str, int]) -> ChatCompletionUsage:
-    prompt = (
-        values["input_tokens"]
-        + values["cache_creation_input_tokens"]
-        + values["cache_read_input_tokens"]
-    )
-    completion = values["output_tokens"]
-    return ChatCompletionUsage(
-        prompt_tokens=prompt, completion_tokens=completion, total_tokens=prompt + completion
-    )
+    return anthropic_usage(AnthropicUsage.model_validate(values))
 
 
 async def normalize_messages(response: httpx.Response) -> AsyncGenerator[StreamUpdate]:
@@ -94,6 +87,7 @@ async def normalize_messages(response: httpx.Response) -> AsyncGenerator[StreamU
     blocks: dict[int, str] = {}
     values: dict[str, int] = {}
     reason = None
+    final_output = False
     async for record in read_sse(response):
         data = _object.validate_python(json.loads(record.data))
         kind = data.get("type")
@@ -156,13 +150,18 @@ async def normalize_messages(response: httpx.Response) -> AsyncGenerator[StreamU
                 reason = finish_reason(update.delta.stop_reason)
             if update.usage is not None:
                 values.update(update.usage.model_dump(exclude_none=True))
+                if reason is not None and update.usage.output_tokens is not None:
+                    final_output = True
                 yield StreamUpdate(type="usage", usage=_usage(values))
         elif kind == "message_stop":
             if not started or blocks or reason is None:
                 raise invalid_stream()
+            final_usage = _usage(values)
+            if not final_output:
+                final_usage = final_usage.model_copy(update={"output_tokens": None})
             yield StreamUpdate(
                 type="completed",
-                usage=_usage(values),
+                usage=final_usage,
                 finish_reasons=[StreamFinishReason(index=0, finish_reason=reason)],
             )
             return

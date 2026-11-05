@@ -204,7 +204,6 @@ def test_json_object_prompt_and_validated_response(
     assert body["structured_output"] == {
         "mode": "json_object",
         "attempts": 1,
-        "total_usage": completion["usage"],
     }
     sent = json.loads(upstream.call_args.args[0].content)
     assert sent["response_format"] == {"type": "json_object"}
@@ -285,9 +284,8 @@ def test_schema_repair_preserves_task_and_sampling_parameters(
     assert response.json()["structured_output"] == {
         "mode": "json_schema",
         "attempts": 2,
-        "total_usage": {"prompt_tokens": 24, "completion_tokens": 16, "total_tokens": 40},
     }
-    assert response.json()["usage"] == completion["usage"]
+    assert response.json()["usage"] == {"input_tokens": 24, "output_tokens": 16, "total_tokens": 40}
     first, second = [json.loads(call.args[0].content) for call in upstream.call_args_list]
     original_messages = first.pop("messages")
     repaired_messages = second.pop("messages")
@@ -420,7 +418,11 @@ def test_missing_usage_is_not_reported_as_complete_total(
     upstream.side_effect = [reply(completion, "invalid", usage=None), reply(completion, "{}")]
     response = chat_client.post("/v1/chat/completions", json=payload(max_retries=1))
     assert response.status_code == 200
-    assert response.json()["structured_output"]["total_usage"] is None
+    assert response.json()["usage"] == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+    }
 
 
 @pytest.fixture
@@ -496,7 +498,6 @@ def test_messages_repair_uses_the_same_system_and_native_schema(
     assert response.json()["structured_output"] == {
         "mode": "json_schema",
         "attempts": 2,
-        "total_usage": {"prompt_tokens": 2, "completion_tokens": 4, "total_tokens": 6},
     }
     first, second = [json.loads(call.args[0].content) for call in upstream.call_args_list]
     assert second["system"] == first["system"]
@@ -526,7 +527,11 @@ def test_plain_text_request_ignores_structured_retry_budget(
     request.pop("response_format")
     response = chat_client.post("/v1/chat/completions", json=request)
     assert response.status_code == 200
-    assert response.json() == {**completion, "model": "general-chat"}
+    assert response.json() == {
+        **completion,
+        "model": "general-chat",
+        "usage": {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+    }
     upstream.assert_called_once()
     assert "max_retries" not in json.loads(upstream.call_args.args[0].content)
 

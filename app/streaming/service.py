@@ -1,6 +1,7 @@
 """Assign stable event identities and arbitrate a stream's single terminal state."""
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator
 from uuid import uuid4
@@ -10,6 +11,7 @@ from starlette.responses import StreamingResponse
 from starlette.types import Receive, Scope, Send
 
 from app.core.errors import GatewayError, map_upstream_error
+from app.governance.context import current_call
 from app.schemas.chat import ChatCompletionUsage
 from app.schemas.streaming import StreamError, StreamEvent
 from app.streaming.provider import CompletionStream, invalid_stream
@@ -27,20 +29,33 @@ class StreamSession:
         self.terminal: StreamEvent | None = None
         self.usage: ChatCompletionUsage | None = None
         self._closed = False
+        self.call = current_call.get()
+        if self.call is not None:
+            self.call.record.stream_id = self.stream_id
+            if self.call.active_attempt is not None:
+                self.call.active_attempt.record.stream_id = self.stream_id
 
     def _event(self, kind: str, **payload: object) -> StreamEvent | None:
         if self.terminal is not None:
             return None
-        self.sequence += 1
         event = StreamEvent(
             type=kind,
             stream_id=self.stream_id,
-            sequence=self.sequence,
+            sequence=self.sequence + 1,
             model=self.model,
             **payload,
         )
+        self.sequence += 1
         if kind in _TERMINAL:
             self.terminal = event
+            if self.call is not None:
+                self.call.terminal(
+                    kind,
+                    reasons=[reason.finish_reason for reason in event.finish_reasons or []],
+                    cancel_reason=event.reason,
+                )
+                if event.error is not None:
+                    self.call.error(event.error.code, stage="streaming")
             logger.info(
                 "Stream %s model=%s terminal=%s code=%s",
                 self.stream_id,
@@ -62,7 +77,7 @@ class StreamSession:
             try:
                 await self.upstream.aclose()
             except Exception:
-                logger.exception("Failed to close upstream for stream %s", self.stream_id)
+                logger.error("UPSTREAM_CLOSE_FAILED stream_id=%s", self.stream_id)
 
     async def events(self) -> AsyncGenerator[StreamEvent]:
         try:
@@ -75,7 +90,11 @@ class StreamSession:
                     return
                 if update.usage is not None:
                     self.usage = update.usage
-                payload = update.model_dump(exclude={"type"}, exclude_none=True)
+                payload = {
+                    "delta": update.delta,
+                    "usage": update.usage,
+                    "finish_reasons": update.finish_reasons,
+                }
                 if update.type == "completed" and self.usage is not None:
                     payload["usage"] = self.usage
                 event = self._event(update.type, **payload)
@@ -90,7 +109,7 @@ class StreamSession:
         except Exception as exc:
             error = map_upstream_error(exc)
             if error is None:
-                logger.exception("Unexpected stream failure for %s", self.stream_id)
+                logger.error("STREAM_INTERNAL_ERROR stream_id=%s", self.stream_id)
                 error = GatewayError(500, "INTERNAL_ERROR", "Internal server error")
             event = self._event(
                 "failed",
@@ -106,10 +125,13 @@ class StreamSession:
         events = self.events()
         try:
             async for event in events:
+                data = event.model_dump(exclude_none=True)
+                if event.usage is not None:
+                    data["usage"] = event.usage.model_dump()
                 yield (
                     f"id: {event.stream_id}:{event.sequence}\n"
                     f"event: {event.type}\n"
-                    f"data: {event.model_dump_json(exclude_none=True)}\n\n"
+                    f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
                 )
         finally:
             await events.aclose()

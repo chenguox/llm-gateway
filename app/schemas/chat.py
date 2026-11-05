@@ -2,7 +2,16 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    StringConstraints,
+    computed_field,
+    model_validator,
+)
 
 from app.schemas.prompts import PromptSelection
 from app.schemas.structured_output import ResponseFormat
@@ -52,11 +61,25 @@ class AssistantMessage(BaseModel):
 
 
 class ChatCompletionUsage(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    prompt_tokens: int = Field(ge=0)
-    completion_tokens: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0, strict=True)
+    output_tokens: int | None = Field(default=None, ge=0, strict=True)
+    _details: dict[str, int | None] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def derive_total(cls, value: object) -> object:
+        if isinstance(value, dict) and "total_tokens" in value:
+            value = {name: counter for name, counter in value.items() if name != "total_tokens"}
+        return value
+
+    @computed_field
+    @property
+    def total_tokens(self) -> int | None:
+        if self.input_tokens is None or self.output_tokens is None:
+            return None
+        return self.input_tokens + self.output_tokens
 
 
 class ChatCompletionChoice(BaseModel):
@@ -68,7 +91,6 @@ class ChatCompletionChoice(BaseModel):
 class StructuredOutputInfo(BaseModel):
     mode: Literal["json_object", "json_schema"]
     attempts: int = Field(ge=1)
-    total_usage: ChatCompletionUsage | None = None
 
 
 class LLMResponse(BaseModel):

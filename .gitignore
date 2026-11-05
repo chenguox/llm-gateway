@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+reports/verification/
 build/
 dist/
 *.egg-info/

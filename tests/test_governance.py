@@ -672,6 +672,86 @@ def test_local_query_command_reads_call_and_attempts(
     assert attempts[0]["attempt_number"] == 1
 
 
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        ([], 2),
+        (["--model", "general-chat"], 1),
+        (["--model", "coding-assistant"], 1),
+        (["--model", "missing-model"], 0),
+        (["--limit", "1"], 1),
+        (["--since", "2000-01-01T00:00:00+08:00"], 2),
+        (["--since", "2099-01-01T00:00:00+08:00"], 0),
+        (["--model", "general-chat", "--limit", "1"], 1),
+    ],
+)
+def test_local_query_filters_and_limits(
+    priced_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+    arguments: list[str],
+    expected: int,
+) -> None:
+    from app.governance.__main__ import main
+
+    responses = [
+        priced_client.post("/v1/chat/completions", json=request_body(model=model))
+        for model in ("general-chat", "coding-assistant")
+    ]
+    assert all(response.status_code == 200 for response in responses)
+    monkeypatch.setattr("sys.argv", ["app.governance", *arguments])
+    main()
+    calls = json.loads(capsys.readouterr().out)
+    assert len(calls) == expected
+    assert all(call["result"]["status"] == "completed" for call in calls)
+    if "--model" in arguments:
+        model = arguments[arguments.index("--model") + 1]
+        assert all(call["route"]["logical_model"] == model for call in calls)
+
+
+@pytest.mark.parametrize("since", ["not-a-timestamp", "2026-11-05T00:00:00"])
+def test_local_query_rejects_invalid_or_naive_timestamps(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, since: str
+) -> None:
+    from app.governance.__main__ import main
+
+    monkeypatch.setattr("sys.argv", ["app.governance", "--since", since])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2
+    assert "ISO timestamp with a timezone" in capsys.readouterr().err
+
+
+def test_local_query_missing_database_does_not_create_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from app.governance.__main__ import main
+
+    database = Settings().call_records_path
+    assert not database.exists()
+    monkeypatch.setattr("sys.argv", ["app.governance"])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 1
+    assert "database not found" in capsys.readouterr().err
+    assert not database.exists()
+
+
+def test_local_query_storage_error_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from app.governance.__main__ import main
+
+    Settings().call_records_path.write_bytes(b"private-invalid-database")
+    monkeypatch.setattr("sys.argv", ["app.governance"])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 1
+    output = capsys.readouterr()
+    assert "storage unavailable" in output.err
+    assert "private-invalid-database" not in output.err + output.out
+
+
 def test_default_prices_leave_cost_unknown(chat_client: TestClient) -> None:
     response = chat_client.post("/v1/chat/completions", json=request_body())
     call, attempts = read_records(chat_client, response)

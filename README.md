@@ -418,6 +418,25 @@ HTTP 错误、参数校验失败和未处理异常统一使用 `error` 对象。
 
 ## 测试与代码检查
 
+统一验证全部已实现功能，并生成按功能分组的 JSON 汇总、JUnit 报告和执行日志：
+
+```powershell
+.\scripts\verify.ps1
+```
+
+也可使用跨平台入口，或只验证指定模块：
+
+```powershell
+uv run --locked python scripts/verify.py
+.\scripts\verify.ps1 --list
+.\scripts\verify.ps1 --group streaming usage governance
+```
+
+完整的功能点清单、分组说明、报告位置和通过标准见 [功能验证脚本](scripts/README.md)。
+测试使用模拟上游及临时数据库，不会产生真实模型调用费用，也不会修改日常调用记录。
+
+也可以直接运行底层工具：
+
 ```powershell
 uv run pytest
 uv run ruff check .
@@ -490,7 +509,8 @@ llm-gateway/
 ├── config/
 │   ├── models.json        # 内部模型配置，不含密钥值
 │   └── README.md          # 模型维护说明
-├── tests/                 # 接口与配置测试
+├── scripts/               # 统一功能验证入口和功能点清单
+├── tests/                 # 接口、配置、流式输出和调用治理测试
 ├── .env.example           # 环境变量示例
 ├── .gitignore
 ├── .python-version
